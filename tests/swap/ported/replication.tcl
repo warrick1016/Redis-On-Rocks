@@ -342,7 +342,7 @@ foreach mdl {no yes} {
                             swap_data_comp $master [lindex $slaves 1]
                             swap_data_comp $master [lindex $slaves 2]
                         }
-                   }
+                    }
                 }
             }
         }
