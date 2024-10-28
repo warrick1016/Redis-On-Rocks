@@ -10,32 +10,35 @@ jobs:
    unit:
     strategy:
       matrix:
-        platform: [ubuntu-22.04]
+        platform: [ubuntu-24.04]
     runs-on: ${{ matrix.platform }}
     steps:
     - uses: actions/checkout@v2
       with:
-          submodules: true
+        submodules: true
     - name: get rocksdb sha
       id: rocksdb-sha
       run: |
-        echo "::set-output name=sha::$(cd deps/rocksdb && git rev-parse HEAD)"
+        ROCKSDB_SHA=$(cd deps/rocksdb && git rev-parse HEAD)
+        echo "ROCKSDB_SHA is $ROCKSDB_SHA"
+        echo "ROCKSDB_SHA=$ROCKSDB_SHA" >> $GITHUB_ENV
       shell: bash
     - name: cache rocksdb
       id: cache-rocksdb
       uses: actions/cache@v3
       with:
         path: deps/rocksdb
-        key: ${{ runner.os }}-rocksdb-${{ steps.rocksdb-sha.outputs.sha }}
+        key: ${{ runner.os }}-rocksdb-${{ env.ROCKSDB_SHA }}
     - name: unit-test
       run: |
-          sudo apt-get update
-          sudo apt-get -y install libsnappy-dev zlib1g-dev libstdc++6
-          make unit-test -j8
+        sudo apt-get update
+        sudo apt-get -y install libsnappy-dev zlib1g-dev libstdc++6
+        make unit-test -j8
+
    mem:
     strategy:
       matrix:
-        platform: [ubuntu-22.04]
+        platform: [ubuntu-24.04]
     runs-on: ${{ matrix.platform }}
     steps:
     - uses: actions/checkout@v2
@@ -44,14 +47,16 @@ jobs:
     - name: get rocksdb sha
       id: rocksdb-sha
       run: |
-        echo "::set-output name=sha::$(cd deps/rocksdb && git rev-parse HEAD)"
+        ROCKSDB_SHA=$(cd deps/rocksdb && git rev-parse HEAD)
+        echo "ROCKSDB_SHA is $ROCKSDB_SHA"
+        echo "ROCKSDB_SHA=$ROCKSDB_SHA" >> $GITHUB_ENV
       shell: bash
     - name: cache rocksdb
       id: cache-rocksdb
       uses: actions/cache@v3
       with:
         path: deps/rocksdb
-        key: ${{ runner.os }}-rocksdb-${{ steps.rocksdb-sha.outputs.sha }}
+        key: ${{ runner.os }}-rocksdb-${{ env.ROCKSDB_SHA }}
     - name: make
       run: |
           sudo apt-get update
@@ -59,10 +64,11 @@ jobs:
           make -j8
     - name: make test
       run: make test
+
    swap:
     strategy:
       matrix:
-        platform: [ubuntu-22.04]
+        platform: [ubuntu-24.04]
     runs-on: ${{ matrix.platform }}
     steps:
     - uses: actions/checkout@v2
@@ -71,14 +77,16 @@ jobs:
     - name: get rocksdb sha
       id: rocksdb-sha
       run: |
-        echo "::set-output name=sha::$(cd deps/rocksdb && git rev-parse HEAD)"
+        ROCKSDB_SHA=$(cd deps/rocksdb && git rev-parse HEAD)
+        echo "ROCKSDB_SHA is $ROCKSDB_SHA"
+        echo "ROCKSDB_SHA=$ROCKSDB_SHA" >> $GITHUB_ENV
       shell: bash
     - name: cache rocksdb
       id: cache-rocksdb
       uses: actions/cache@v3
       with:
         path: deps/rocksdb
-        key: ${{ runner.os }}-rocksdb-${{ steps.rocksdb-sha.outputs.sha }}
+        key: ${{ runner.os }}-rocksdb-${{ env.ROCKSDB_SHA }}
     - name: make
       run: |
           sudo apt-get update
@@ -86,10 +94,11 @@ jobs:
           make -j8
     - name: make test
       run: make test-disk
+
    swap-asan:
     strategy:
       matrix:
-        platform: [ubuntu-22.04]
+        platform: [ubuntu-24.04]
     runs-on: ${{ matrix.platform }}
     steps:
     - uses: actions/checkout@v2
@@ -98,20 +107,22 @@ jobs:
     - name: get rocksdb sha
       id: rocksdb-sha
       run: |
-        echo "::set-output name=sha::$(cd deps/rocksdb && git rev-parse HEAD)"
+        ROCKSDB_SHA=$(cd deps/rocksdb && git rev-parse HEAD)
+        echo "ROCKSDB_SHA is $ROCKSDB_SHA"
+        echo "ROCKSDB_SHA=$ROCKSDB_SHA" >> $GITHUB_ENV
       shell: bash
     - name: cache rocksdb
       id: cache-rocksdb
       uses: actions/cache@v3
       with:
         path: deps/rocksdb
-        key: ${{ runner.os }}-rocksdb-${{ steps.rocksdb-sha.outputs.sha }}
+        key: ${{ runner.os }}-rocksdb-${{ env.ROCKSDB_SHA }}
     - name: make
       run: |
           sudo apt-get update
           sudo apt-get -y install libsnappy-dev zlib1g-dev libstdc++6
-          make SANTIZER=address -j8
-    - name: make test
-      run: make test-disk
+          make SANITIZER=address -j8
+    - name: make test 
+      run: make test-asan-disk
 
 
