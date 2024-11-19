@@ -114,13 +114,12 @@ rocksdb: .make-prerequisites
 
 .PHONY: rocksdb
 
-ifeq ($(MALLOC),jemalloc)
-XREDIS_GTID_CFLAGS= -std=gnu99 -Wall -pipe -g3 -O3 -funroll-loops $(CFLAGS) -I../../src -DUSE_JEMALLOC -I../jemalloc/include -DGTID_MALLOC_INCLUDE=\<gtid_zmalloc.h\> 
-else
-XREDIS_GTID_CFLAGS= -std=gnu99 -Wall -pipe -g3 -O3 -funroll-loops $(CFLAGS) -I../../src 
-endif
-
+XREDIS_GTID_CFLAGS= -std=gnu99 -Wall -pipe -g3 -O3 -funroll-loops $(CFLAGS)
 XREDIS_GTID_LDFLAGS= $(LDFLAGS)
+
+ifndef SANITIZER
+    XREDIS_GTID_CFLAGS+=-I../../src -DUSE_JEMALLOC -I../jemalloc/include -DGTID_MALLOC_INCLUDE=\<gtid_zmalloc.h\>
+endif
 
 xredis-gtid: jemalloc .make-prerequisites
 	@printf '%b %b\n' $(MAKECOLOR)MAKE$(ENDCOLOR) $(BINCOLOR)$@$(ENDCOLOR)
