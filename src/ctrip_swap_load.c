@@ -73,7 +73,9 @@ int tryLoadKey(redisDb *db, robj *key, int oom_sensitive) {
     client *load_client = server.load_clients[db->id];
 
     /* skip pure hot key */
-    if (keyIsPureHot(db, key)) {
+    robj *value = lookupKey(db, key, LOOKUP_NOTOUCH);
+    objectMeta *object_meta = lookupMeta(db, key);
+    if (keyIsPureHot(object_meta, value)) {
         return 0;
     }
 

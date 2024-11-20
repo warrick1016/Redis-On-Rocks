@@ -158,14 +158,13 @@ int keyIsHot(objectMeta *object_meta, robj *value) {
     return swapObjectMetaIsHot(&som);
 }
 
-int keyIsPureHot(redisDb *db, robj *key) {
-    if (lookupKey(db, key, LOOKUP_NOTOUCH) == NULL) {
+int keyIsPureHot(objectMeta *object_meta, robj *value) {
+    if (value == NULL) {
         return 0;
     } else {
-        objectMeta *om = lookupMeta(db, key);
-        if (om == NULL) {
+        if (object_meta == NULL) {
             return 1;
-        } else if (om->swap_type == SWAP_TYPE_BITMAP && bitmapObjectMetaIsMarker(om)) {
+        } else if (object_meta->swap_type == SWAP_TYPE_BITMAP && bitmapObjectMetaIsMarker(object_meta)) {
             return 1;
         } else {
             return 0;
