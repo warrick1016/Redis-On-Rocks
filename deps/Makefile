@@ -40,7 +40,6 @@ distclean:
 	-(cd hdr_histogram && $(MAKE) clean) > /dev/null || true
 	-(cd xredis-gtid && [ -f Makefile ] && $(MAKE) clean) > /dev/null || true
 	-(cd tdigest && $(MAKE) clean) > /dev/null || true
-	-(cd rocksdb && $(MAKE) clean) > /dev/null || true
 	-(rm -f .make-*)
 
 .PHONY: distclean
