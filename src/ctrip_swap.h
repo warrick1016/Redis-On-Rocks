@@ -521,7 +521,7 @@ typedef struct objectMetaType {
 
 typedef struct objectMeta {
   uint64_t version:60;
-  int swap_type:4;
+  unsigned swap_type:4;
   union {
     long long len;
     unsigned long long ptr;
