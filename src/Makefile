@@ -81,6 +81,10 @@ ifeq ($(USE_JEMALLOC),yes)
 	MALLOC=jemalloc
 endif
 
+ifeq ($(USE_JEMALLOC),no)
+	MALLOC=libc
+endif
+
 ifdef SANITIZER
 ifeq ($(SANITIZER),address)
    MALLOC=libc

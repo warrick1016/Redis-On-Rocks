@@ -277,7 +277,6 @@ int memtest_test(unsigned long *m, size_t bytes, int passes, int interactive) {
  * end of the region between fill and compare cycles in order to trash
  * the cache. */
 #define MEMTEST_DECACHE_SIZE (1024*8)
-REDIS_NO_SANITIZE("address")
 int memtest_preserving_test(unsigned long *m, size_t bytes, int passes) {
     unsigned long backup[MEMTEST_BACKUP_WORDS];
     unsigned long *p = m;
