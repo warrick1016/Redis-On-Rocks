@@ -1,7 +1,1 @@
 leak:hashTypeConvertZiplist
-leak:listMetaCreate
-leak:bitmapMetaCreate
-leak:bitmapMetaDup
-leak:bitmapMetaDecode
-leak:bitmapObjectMetaDecode
-leak:decodeListMeta
