@@ -1,5 +1,10 @@
 leak:hashTypeConvertZiplist
-leak:*listMetaCreate*
-leak:*bitmapMetaCreate*
-leak:*bitmapMetaDecode*
-leak:*bitmapMetaDup*
+leak:^listMetaCreate$
+leak:^bitmapMetaCreate$
+leak:^bitmapMetaDecode$
+leak:^bitmapMetaDup$
+leak:decodeListMeta
+leak:bitmapObjectMetaDecode
+leak:bitmapObjectMerge
+leak:ctrip_swap_bitmap.c
+leak:ctrip_swap_list.c
