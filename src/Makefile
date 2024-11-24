@@ -89,6 +89,7 @@ ifdef SANITIZER
 ifeq ($(SANITIZER),address)
    MALLOC=libc
    export LSAN_OPTIONS=suppressions=suppr.txt
+   export ASAN_OPTIONS=detect_leaks=1
    CFLAGS+=-fsanitize=address -fno-sanitize-recover=all -fno-omit-frame-pointer
    LDFLAGS+=-fsanitize=address
 else
