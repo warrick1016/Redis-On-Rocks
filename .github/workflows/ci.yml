@@ -142,6 +142,13 @@ jobs:
           sudo apt-get update
           sudo apt-get -y install libsnappy-dev zlib1g-dev libstdc++6
           make SANITIZER=address -j8
+    - name: cache rocksdb (if cache not found)
+      if: steps.cache-rocksdb-asan.outputs.cache-hit != 'true'
+      uses: actions/cache@v3
+      with:
+        path: deps/rocksdb
+        key: ${{ runner.os }}-rocksdb-asan-${{ env.ROCKSDB_SHA }}
+        restore-keys: ${{ runner.os }}-rocksdb-asan-${{ env.ROCKSDB_SHA }}
     - name: make test
       run: make test-disk
 
