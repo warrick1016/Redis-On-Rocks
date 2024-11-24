@@ -323,6 +323,7 @@ REDIS_MONITOR_PIPE_OBJ=dict.o sds.o zmalloc.o siphash.o mt19937-64.o redis-monit
 
 all: $(REDIS_SERVER_NAME) $(REDIS_SENTINEL_NAME) $(REDIS_CLI_NAME) $(REDIS_BENCHMARK_NAME) $(REDIS_CHECK_RDB_NAME) $(REDIS_CHECK_AOF_NAME) $(REDIS_MONITOR_PIPE_NAME)
 	@echo ""
+	@echo $(LSAN_OPTIONS)
 	@echo "Hint: It's a good idea to run 'make test' ;)"
 	@echo ""
 
