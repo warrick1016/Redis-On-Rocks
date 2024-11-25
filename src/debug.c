@@ -1693,6 +1693,7 @@ void logCurrentClient(void) {
 #define MEMTEST_MAX_REGIONS 128
 
 /* A non destructive memory test executed during segfault. */
+REDIS_NO_SANITIZE("address")
 int memtest_test_linux_anonymous_maps(void) {
     FILE *fp;
     char line[1024];
@@ -1755,6 +1756,7 @@ int memtest_test_linux_anonymous_maps(void) {
 }
 #endif /* HAVE_PROC_MAPS */
 
+REDIS_NO_SANITIZE("address")
 static void killMainThread(void) {
     int err;
     if (pthread_self() != server.main_thread_id && pthread_cancel(server.main_thread_id) == 0) {

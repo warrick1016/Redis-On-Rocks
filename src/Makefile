@@ -12,7 +12,6 @@
 # Dependencies are stored in the Makefile.dep file. To rebuild this file
 # Just use 'make dep', but this is only needed by developers.
 
-export LSAN_OPTIONS=suppressions=suppr.txt
 
 release_hdr := $(shell sh -c './mkreleasehdr.sh')
 uname_S := $(shell sh -c 'uname -s 2>/dev/null || echo not')
@@ -87,25 +86,22 @@ ifeq ($(USE_JEMALLOC),no)
 	MALLOC=libc
 endif
 
+export LSAN_OPTIONS=suppressions=suppr.txt
 ifdef SANITIZER
-ifeq ($(SANITIZER),address)
-   MALLOC=libc
-   CFLAGS+=-fsanitize=address -fno-sanitize-recover=all -fno-omit-frame-pointer
-   LDFLAGS+=-fsanitize=address
-else
-ifeq ($(SANITIZER),undefined)
-   MALLOC=libc
-   CFLAGS+=-fsanitize=undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
-   LDFLAGS+=-fsanitize=undefined
-else
-ifeq ($(SANITIZER),thread)
-   CFLAGS+=-fsanitize=thread -fno-sanitize-recover=all -fno-omit-frame-pointer
-   LDFLAGS+=-fsanitize=thread
-else
-    $(error "unknown sanitizer=${SANITIZER}")
-endif
-endif
-endif
+    ifeq ($(SANITIZER),address)
+        MALLOC=libc
+        CFLAGS+=-fsanitize=address -fno-sanitize-recover=all -fno-omit-frame-pointer
+        LDFLAGS+=-fsanitize=address
+    else ifeq ($(SANITIZER),undefined)
+        MALLOC=libc
+        CFLAGS+=-fsanitize=undefined -fno-sanitize-recover=all -fno-omit-frame-pointer
+        LDFLAGS+=-fsanitize=undefined
+    else ifeq ($(SANITIZER),thread)
+        CFLAGS+=-fsanitize=thread -fno-sanitize-recover=all -fno-omit-frame-pointer
+        LDFLAGS+=-fsanitize=thread
+    else
+        $(error "unknown sanitizer=${SANITIZER}")
+    endif
 endif
 
 # Override default settings if possible
