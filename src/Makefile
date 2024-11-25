@@ -12,7 +12,6 @@
 # Dependencies are stored in the Makefile.dep file. To rebuild this file
 # Just use 'make dep', but this is only needed by developers.
 
-
 release_hdr := $(shell sh -c './mkreleasehdr.sh')
 uname_S := $(shell sh -c 'uname -s 2>/dev/null || echo not')
 uname_M := $(shell sh -c 'uname -m 2>/dev/null || echo not')
@@ -319,7 +318,6 @@ REDIS_MONITOR_PIPE_OBJ=dict.o sds.o zmalloc.o siphash.o mt19937-64.o redis-monit
 
 all: $(REDIS_SERVER_NAME) $(REDIS_SENTINEL_NAME) $(REDIS_CLI_NAME) $(REDIS_BENCHMARK_NAME) $(REDIS_CHECK_RDB_NAME) $(REDIS_CHECK_AOF_NAME) $(REDIS_MONITOR_PIPE_NAME)
 	@echo ""
-	@echo $(LSAN_OPTIONS)
 	@echo "Hint: It's a good idea to run 'make test' ;)"
 	@echo ""
 

@@ -6282,7 +6282,6 @@ int changeListenPort(int port, socketFds *sfd, aeFileProc *accept_handler) {
     return C_OK;
 }
 
-REDIS_NO_SANITIZE("address")
 static void sigShutdownHandler(int sig) {
     char *msg;
 
