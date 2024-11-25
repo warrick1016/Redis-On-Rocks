@@ -47,7 +47,7 @@ jobs:
     - name: test
       run: |
         sudo apt-get install tcl8.6
-        ./runtest --swap-mode disk --accurate --verbose --dump-logs
+        ./runtest --swap-mode disk --sanitizer --accurate --verbose --dump-logs
     - name: unittest
       run: ./src/redis-server test all
 
@@ -78,7 +78,7 @@ jobs:
     - name: test
       run: |
         sudo apt-get install tcl8.6
-        ./runtest --swap-mode disk --accurate --verbose --dump-logs
+        ./runtest --swap-mode disk --sanitizer --accurate --verbose --dump-logs
 
   test-sanitizer-address:
     runs-on: ubuntu-22.04
@@ -107,7 +107,7 @@ jobs:
     - name: test
       run: |
         sudo apt-get install tcl8.6 tclx -y
-        ./runtest --swap-mode disk --accurate --verbose --dump-logs
+        ./runtest --swap-mode disk --sanitizer --accurate --verbose --dump-logs
     - name: unittest
       run: ./src/redis-server test all
 
@@ -138,7 +138,7 @@ jobs:
     - name: test
       run: |
         sudo apt-get install tcl8.6 tclx -y
-        ./runtest --swap-mode disk --accurate --verbose --dump-logs
+        ./runtest --swap-mode disk --sanitizer --accurate --verbose --dump-logs
     - name: unittest
       run: ./src/redis-server test all
 
@@ -169,7 +169,7 @@ jobs:
     - name: test
       run: |
         sudo apt-get install tcl8.6 tcl-tls
-        ./runtest --swap-mode disk --config io-threads 4 --config io-threads-do-reads yes --accurate --verbose --tags network --dump-logs
+        ./runtest --swap-mode disk --sanitizer --config io-threads 4 --config io-threads-do-reads yes --accurate --verbose --tags network --dump-logs
 
   test-valgrind:
     runs-on: ubuntu-22.04

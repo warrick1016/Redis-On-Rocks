@@ -142,7 +142,7 @@ jobs:
           sudo apt-get update
           sudo apt-get -y install libsnappy-dev zlib1g-dev libstdc++6
           make SANITIZER=address -j8
-    - name: make test
-      run: make test-disk
+    - name: make test 
+      run: make test-asan-disk
 
 

@@ -14,6 +14,7 @@ source tests/support/ctrip_util.tcl
 source tests/swap/support/util.tcl
 
 set ::disk_tests {
+
     swap/integration/rordb
     swap/integration/client_rate_limit_bug
     swap/integration/type_error
@@ -115,6 +116,7 @@ set ::disk_tests {
     integration/convert-zipmap-hash-on-load
     integration/redis-benchmark
     integration/psync2
+
 }
 
 # ctrip/aof-gtid
@@ -222,6 +224,7 @@ set ::tlsdir "tests/tls"
 set ::swap 0
 set ::target_db 9
 set ::swap_debug_evict_keys 0
+set ::swap_asan_open 0
 
 # Set to 1 when we are running in client mode. The Redis test uses a
 # server-client model to run tests simultaneously. The server instance
@@ -363,8 +366,8 @@ proc run_solo {name code} {
 proc cleanup {} {
     if {!$::quiet} {puts -nonewline "Cleanup: may take some time... "}
     flush stdout
-    catch {exec rm -rf {*}[glob tests/tmp/redis.conf.*]}
-    catch {exec rm -rf {*}[glob tests/tmp/server.*]}
+#    catch {exec rm -rf {*}[glob tests/tmp/redis.conf.*]}
+#    catch {exec rm -rf {*}[glob tests/tmp/server.*]}
     if {!$::quiet} {puts "OK"}
 }
 
@@ -644,6 +647,7 @@ proc send_data_packet {fd status data} {
 proc print_help_screen {} {
     puts [join {
         "--valgrind         Run the test over valgrind."
+        "--sanitizer        Run the test over sanitizer."
         "--durable          suppress test crashes and keep running"
         "--stack-logging    Enable OSX leaks/malloc stack logging."
         "--accurate         Run slow randomized tests for more iterations."
@@ -704,6 +708,8 @@ for {set j 0} {$j < [llength $argv]} {incr j} {
         incr j
     } elseif {$opt eq {--valgrind}} {
         set ::valgrind 1
+    } elseif {$opt eq {--sanitizer}} {
+        set ::sanitizer 1
     } elseif {$opt eq {--stack-logging}} {
         if {[string match {*Darwin*} [exec uname -a]]} {
             set ::stack_logging 1
@@ -786,6 +792,12 @@ for {set j 0} {$j < [llength $argv]} {incr j} {
         if {$::swap_mode == "disk"} {
             set ::all_tests $::disk_tests
             set ::swap_debug_evict_keys -1
+            set ::target_db 0
+        } 
+        incr j
+    } elseif {$opt eq {--asan-stats}} {
+        set ::asan_stats $arg 
+        if {$::asan_stats != ""} {
             set ::target_db 0
         } 
         incr j
