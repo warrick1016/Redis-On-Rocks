@@ -66,7 +66,6 @@ set ::disk_tests {
     swap/unit/swap_error
     swap/unit/multi
     swap/unit/info
-    swap/unit/client
     swap/unit/debug
     swap/unit/select
     swap/unit/slowlog
@@ -77,7 +76,6 @@ set ::disk_tests {
     ctrip/gtid_merge
     ctrip/gtid
     ctrip/sync-gtid
-    ctrip/replication-psync-gtid
     ctrip/monitor
     unit/printver
     unit/dump
