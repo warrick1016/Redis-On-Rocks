@@ -193,6 +193,7 @@ set ::baseport 21111; # initial port for spawned redis servers
 set ::portcount 8000; # we don't wanna use more than 10000 to avoid collision with cluster bus ports
 set ::traceleaks 0
 set ::valgrind 0
+set ::sanitizer 0
 set ::durable 0
 set ::tls 0
 set ::stack_logging 0
