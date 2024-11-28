@@ -14,7 +14,6 @@ source tests/support/ctrip_util.tcl
 source tests/swap/support/util.tcl
 
 set ::disk_tests {
-
     swap/integration/rordb
     swap/integration/client_rate_limit_bug
     swap/integration/type_error
@@ -67,6 +66,7 @@ set ::disk_tests {
     swap/unit/swap_error
     swap/unit/multi
     swap/unit/info
+    swap/unit/client
     swap/unit/debug
     swap/unit/select
     swap/unit/slowlog
@@ -77,6 +77,7 @@ set ::disk_tests {
     ctrip/gtid_merge
     ctrip/gtid
     ctrip/sync-gtid
+    ctrip/replication-psync-gtid
     ctrip/monitor
     unit/printver
     unit/dump
@@ -116,7 +117,6 @@ set ::disk_tests {
     integration/convert-zipmap-hash-on-load
     integration/redis-benchmark
     integration/psync2
-
 }
 
 # ctrip/aof-gtid
