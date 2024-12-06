@@ -16,43 +16,43 @@ proc format_command {args} {
     set _ $cmd
 }
 start_server [list overrides [list save ""] ] {
-    
-    set master [srv 0 client]
-    $master config set swap-ratelimit-maxmemory-percentage 100
-    $master config set maxmemory-policy allkeys-lru
-    $master config set maxmemory 20MB
-    $master config set swap-debug-evict-keys 0
-    $master config set hz 100
-    # puts [randstring 100000 100000 binary]
-    set host [srv 0 host]
-    set port [srv 0 port]
-    set load_handles []
-    set j 0
-    for {set j 0} {$j < 20} {incr j} {
-        set load_handle [start_hash_hset $host $port 0 [expr {$j * 100}] [expr {($j +1)*100 }] ]
-        lappend load_handles $load_handle
-    }
-    after 1000
-    wait_for_condition 1000 500 {
-        [$master dbsize] == 2000
-    } else {
-        fail "Fail to full sync"
-    }
-    
-    for {set j 0} {$j < 20} {incr j} {
-       set ele [lindex $load_handles $j]
-       stop_bg_complex_data $ele
-    }
-    
-    # hget 
-    for {set j 0} {$j < 100} {incr j} {
-        set load_handle [start_hash_hget $host $port 0 [expr {$j * 20}] [expr {($j +1)*20 }] ]
-        lappend load_handles $load_handle
-    }
-    after 10000
-    for {set j 0} {$j < 100} {incr j} {
-       set ele [lindex $load_handles $j]
-       stop_bg_complex_data $ele
-    }
+    if {!$::sanitizer} {
+        set master [srv 0 client]
+        $master config set swap-ratelimit-maxmemory-percentage 100
+        $master config set maxmemory-policy allkeys-lru
+        $master config set maxmemory 20MB
+        $master config set swap-debug-evict-keys 0
+        $master config set hz 100
+        # puts [randstring 100000 100000 binary]
+        set host [srv 0 host]
+        set port [srv 0 port]
+        set load_handles []
+        set j 0
+        for {set j 0} {$j < 20} {incr j} {
+            set load_handle [start_hash_hset $host $port 0 [expr {$j * 100}] [expr {($j +1)*100 }] ]
+            lappend load_handles $load_handle
+        }
+        after 1000
+        wait_for_condition 1000 500 {
+            [$master dbsize] == 2000
+        } else {
+            fail "Fail to full sync"
+        }
 
+        for {set j 0} {$j < 20} {incr j} {
+            set ele [lindex $load_handles $j]
+            stop_bg_complex_data $ele
+        }
+
+        # hget 
+        for {set j 0} {$j < 100} {incr j} {
+            set load_handle [start_hash_hget $host $port 0 [expr {$j * 20}] [expr {($j +1)*20 }] ]
+            lappend load_handles $load_handle
+        }
+        after 10000
+        for {set j 0} {$j < 100} {incr j} {
+            set ele [lindex $load_handles $j]
+            stop_bg_complex_data $ele
+        }
+    }
 }
