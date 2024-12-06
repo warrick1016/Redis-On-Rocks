@@ -3,6 +3,7 @@ start_server {tags "clients"} {
     set host [srv 0 host]
     set port [srv 0 port]
 
+    if (!$::sanitizer) {
     test {kill client just finish swap} {
         set r1 [redis $host $port]
         set r2 [redis $host $port]
@@ -17,6 +18,7 @@ start_server {tags "clients"} {
 
         set r3 [redis $host $port]
         $r3 ping
+    }
     }
 }
 

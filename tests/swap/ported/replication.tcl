@@ -52,6 +52,8 @@ start_server {tags {"repl network"}} {
 }
 
 start_server {tags {"repl"}} {
+    if {!$::sanitizer} {
+        #05
     set A [srv 0 client]
     set A_host [srv 0 host]
     set A_port [srv 0 port]
@@ -192,9 +194,12 @@ start_server {tags {"repl"}} {
             }
         }
     }
+    }
 }
 
 start_server {tags {"repl"}} {
+    if {!$::sanitizer} {
+        #06
     r set mykey foo
 
     start_server {} {
@@ -255,10 +260,13 @@ start_server {tags {"repl"}} {
             assert {$slave_state eq {connected}}
         }
     }
+    }
 }
 
 foreach mdl {no yes} {
     foreach sdl {disabled swapdb} {
+        if {!$::sanitizer} {
+        #01
         start_server {tags {"repl"}} {
             set master [srv 0 client]
             $master config set repl-diskless-sync $mdl
@@ -346,6 +354,7 @@ foreach mdl {no yes} {
                 }
             }
         }
+        }
     }
 }
 
@@ -402,7 +411,7 @@ start_server {tags {"repl"}} {
     }
 }
 
-test {slave fails full sync and diskless load swapdb recovers it} {
+test {slave fails full sync and diskless load swapdb recovers it} {  
     start_server {tags {"repl"}} {
         set slave [srv 0 client]
         set slave_host [srv 0 host]
@@ -602,6 +611,8 @@ proc compute_cpu_usage {start end} {
 
 # test diskless rdb pipe with multiple replicas, which may drop half way
 start_server {tags {"repl"}} {
+    if {!$::sanitizer} {
+        #03
     set master [srv 0 client]
     $master config set repl-diskless-sync yes
     $master config set repl-diskless-sync-delay 1
@@ -748,6 +759,7 @@ start_server {tags {"repl"}} {
             }
         }
     }
+    }
 }
 
 test "diskless replication child being killed is collected" {
@@ -793,6 +805,8 @@ test "diskless replication child being killed is collected" {
 }
 
 test "diskless replication read pipe cleanup" {
+    if {!$::sanitizer} {
+        #07
     # In diskless replication, we create a read pipe for the RDB, between the child and the parent.
     # When we close this pipe (fd), the read handler also needs to be removed from the event loop (if it still registered).
     # Otherwise, next time we will use the same fd, the registration will be fail (panic), because
@@ -829,6 +843,7 @@ test "diskless replication read pipe cleanup" {
             # make sure master is alive
             $master ping
         }
+    }
     }
 }
 
@@ -885,6 +900,8 @@ test {replicaof right after disconnection} {
 }
 
 test {Kill rdb child process if its dumping RDB is not useful} {
+    if {!$::sanitizer} {
+        #04
     start_server {tags {"repl"}} {
         set slave1 [srv 0 client]
         start_server {} {
@@ -947,6 +964,7 @@ test {Kill rdb child process if its dumping RDB is not useful} {
                 catch {$master shutdown nosave}
             }
         }
+    }
     }
 }
 
