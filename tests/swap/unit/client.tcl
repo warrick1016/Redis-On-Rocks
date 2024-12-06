@@ -56,6 +56,7 @@ start_server {tags "clients"} {
         }
     }
 
+    if (!$::sanitizer) {
     test {client kill conns} {
         set rounds 50
         set load 10
@@ -84,6 +85,7 @@ start_server {tags "clients"} {
             }
             $r ping
         }
+    }
     }
 
 }

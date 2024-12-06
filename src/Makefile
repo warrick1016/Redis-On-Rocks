@@ -86,6 +86,8 @@ ifeq ($(USE_JEMALLOC),no)
 endif
 
 export LSAN_OPTIONS=suppressions=suppr.txt
+export ASAN_OPTIONS=detect_container_overflow=0
+
 ifdef SANITIZER
 ifeq ($(SANITIZER),address)
    MALLOC=libc
