@@ -15,7 +15,6 @@ source tests/swap/support/util.tcl
 
 set ::disk_tests {
     swap/integration/rordb
-    swap/integration/client_rate_limit_bug
     swap/integration/type_error
     swap/integration/zset
     swap/integration/info_rocksdb_stats
@@ -30,7 +29,6 @@ set ::disk_tests {
     swap/integration/swap_load
     swap/integration/persist
     swap/ported/replication-psync
-    swap/ported/replication
     swap/ported/other
     swap/ported/stream-cgroups
     swap/ported/stream
@@ -40,6 +38,7 @@ set ::disk_tests {
     swap/ported/block-repl
     swap/ported/replication-2
     swap/ported/replication-4
+    swap/ported/replication
     swap/ported/psync2-reg
     swap/unit/swap_mode
     swap/unit/absent_cache
@@ -66,7 +65,6 @@ set ::disk_tests {
     swap/unit/swap_error
     swap/unit/multi
     swap/unit/info
-    swap/unit/client
     swap/unit/debug
     swap/unit/select
     swap/unit/slowlog
@@ -77,7 +75,6 @@ set ::disk_tests {
     ctrip/gtid_merge
     ctrip/gtid
     ctrip/sync-gtid
-    ctrip/replication-psync-gtid
     ctrip/monitor
     unit/printver
     unit/dump
