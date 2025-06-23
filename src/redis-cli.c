@@ -967,7 +967,7 @@ static sds cliFormatInvalidateTTY(redisReply *r) {
     sds out = sdsnew("-> invalidate: ");
 
     for (size_t i = 0; i < r->element[1]->elements; i++) {
-        redisReply *key = r->element[1]->element[i];
+        redisReply *key = r->element[1]->element[i]->element[0];
         assert(key->type == REDIS_REPLY_STRING);
 
         out = sdscatfmt(out, "'%s'", key->str, key->len);

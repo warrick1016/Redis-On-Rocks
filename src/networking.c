@@ -2668,7 +2668,7 @@ void clientCommand(client *c) {
 "UNBLOCK <clientid> [TIMEOUT|ERROR]",
 "    Unblock the specified blocked client.",
 "TRACKING (ON|OFF) [REDIRECT <id>] [BCAST] [PREFIX <prefix> [...]]",
-"         [OPTIN] [OPTOUT]",
+"         [OPTIN] [OPTOUT] [SYSTIME period]",
 "    Control server assisted client side caching.",
 "TRACKINGINFO",
 "    Report tracking status for the current connection.",
@@ -2904,7 +2904,7 @@ NULL
         addReply(c,shared.ok);
     } else if (!strcasecmp(c->argv[1]->ptr,"tracking") && c->argc >= 3) {
         /* CLIENT TRACKING (on|off) [REDIRECT <id>] [BCAST] [PREFIX first]
-         *                          [PREFIX second] [OPTIN] [OPTOUT] [SYSTIME second] ... */
+         *           [PREFIX second] [OPTIN] [OPTOUT] [SYSTIME period]... */
         long long redir = 0;
         uint64_t options = 0;
         robj **prefix = NULL;
@@ -2952,11 +2952,16 @@ NULL
                 prefix = zrealloc(prefix,sizeof(robj*)*(numprefix+1));
                 prefix[numprefix++] = c->argv[j];
             } else if (!strcasecmp(c->argv[j]->ptr,"systime") && moreargs) {
+                if (c->resp <= 2) {
+                    addReplyError(c,"Systime mode is only supported for RESP3.");
+                    zfree(prefix);
+                    return;
+                }
                 options |= CLIENT_TRACKING_SYSTIME;
                 j++;
-                if (getLongLongFromObjectOrReply(c,c->argv[j],&systime_period,NULL) !=
-                    C_OK)
-                {
+                int res = getLongLongFromObjectOrReply(c,c->argv[j],&systime_period,NULL);
+                if (res != C_OK || systime_period <= 0) {
+                    addReplyError(c,"The period of systime mode is illegal.");
                     zfree(prefix);
                     return;
                 }
