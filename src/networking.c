@@ -290,7 +290,11 @@ void putClientInPendingWriteQueue(client *c) {
          * a system call. We'll only really install the write handler if
          * we'll not be able to write the whole reply at once. */
         c->flags |= CLIENT_PENDING_WRITE;
-        listLinkNodeHead(server.clients_pending_write, &c->clients_pending_write_node);
+        if (c->flags & CLIENT_TRACKING) {
+            listLinkNodeTail(server.clients_pending_write, &c->clients_pending_write_node);
+        } else {
+            listLinkNodeHead(server.clients_pending_write, &c->clients_pending_write_node);
+        }
     }
 }
 
@@ -1694,6 +1698,7 @@ void unlinkClient(client *c) {
 
     /* Clear the tracking status. */
     if (c->flags & CLIENT_TRACKING) disableTracking(c);
+    ctripTryDisableHeartbeat(c);
 #ifdef ENABLE_SWAP
 
     if (c->rate_limit_event_id != -1) {
@@ -1721,6 +1726,7 @@ void clearClientConnectionState(client *c) {
     serverAssert(!(c->flags &(CLIENT_SLAVE|CLIENT_MASTER)));
 
     if (c->flags & CLIENT_TRACKING) disableTracking(c);
+    ctripTryDisableHeartbeat(c);
     selectDb(c,0);
 #ifdef LOG_REQ_RES
     c->resp = server.client_default_resp;
@@ -2412,11 +2418,22 @@ void sendReplyToClient(connection *conn) {
 int handleClientsWithPendingWrites(void) {
     listIter li;
     listNode *ln;
-    int processed = listLength(server.clients_pending_write);
+    unsigned int processed_tracking_clis = 0;
+    int processed_clients = 0;
 
     listRewind(server.clients_pending_write,&li);
     while((ln = listNext(&li))) {
         client *c = listNodeValue(ln);
+
+        /* If the number of tracking clients to call writeToClient exceeds the limit, 
+           ignore the following tracking clients to avoid blocking the entire event loop. */
+        if (c->flags & CLIENT_TRACKING) {
+            if (processed_tracking_clis >= server.max_tracking_clients_to_write) continue;
+            else processed_tracking_clis++;
+        }
+
+        processed_clients++;
+
         c->flags &= ~CLIENT_PENDING_WRITE;
         listUnlinkNode(server.clients_pending_write,ln);
 
@@ -2445,7 +2462,11 @@ int handleClientsWithPendingWrites(void) {
             installClientWriteHandler(c);
         }
     }
-    return processed;
+
+    if (listLength(server.clients_pending_write) != 0) {
+        tryRegisterClientsWriteEvent();
+    }
+    return processed_clients;
 }
 
 static inline void resetClientInternal(client *c, int free_argv) {
@@ -3654,6 +3675,7 @@ void quitCommand(client *c) {
 void clientCommand(client *c) {
     listNode *ln;
     listIter li;
+    long long heartbeat_period[NUM_HEARTBEAT_ACTIONS] = {0,0};
 
     if (c->argc == 2 && !strcasecmp(c->argv[1]->ptr,"help")) {
         const char *help[] = {
@@ -3687,7 +3709,7 @@ void clientCommand(client *c) {
 "      Kill connections older than the specified age.",
 "LIST [options ...]",
 "    Return information about client connections. Options:",
-"    * TYPE (NORMAL|MASTER|REPLICA|PUBSUB)",
+"    * TYPE (NORMAL|MASTER|REPLICA|PUBSUB|TRACKING)",
 "      Return clients of specified type.",
 "UNPAUSE",
 "    Stop the current client pause, resuming traffic.",
@@ -3704,7 +3726,7 @@ void clientCommand(client *c) {
 "UNBLOCK <clientid> [TIMEOUT|ERROR]",
 "    Unblock the specified blocked client.",
 "TRACKING (ON|OFF) [REDIRECT <id>] [BCAST] [PREFIX <prefix> [...]]",
-"         [OPTIN] [OPTOUT] [NOLOOP]",
+"         [OPTIN] [OPTOUT] [NOLOOP] [SUBKEY]",
 "    Control server assisted client side caching.",
 "TRACKINGINFO",
 "    Report tracking status for the current connection.",
@@ -3712,6 +3734,8 @@ void clientCommand(client *c) {
 "    Protect current client connection from eviction.",
 "NO-TOUCH (ON|OFF)",
 "    Will not touch LRU/LFU stats when this mode is on.",
+"HEARTBEAT (ON|OFF) [SYSTIME period] [MKPS period]",
+"    Server keep heartbeat to push some info to client.",
 NULL
         };
         addReplyHelp(c, help);
@@ -3976,11 +4000,13 @@ NULL
         addReply(c,shared.ok);
     } else if (!strcasecmp(c->argv[1]->ptr,"tracking") && c->argc >= 3) {
         /* CLIENT TRACKING (on|off) [REDIRECT <id>] [BCAST] [PREFIX first]
-         *                          [PREFIX second] [OPTIN] [OPTOUT] [NOLOOP]... */
+         *                          [PREFIX second] [OPTIN] [OPTOUT] [NOLOOP] [SUBKEY]... */
         long long redir = 0;
         uint64_t options = 0;
         robj **prefix = NULL;
         size_t numprefix = 0;
+
+        uint64_t cmd_options = 0;
 
         /* Parse the options. */
         for (int j = 3; j < c->argc; j++) {
@@ -4018,10 +4044,87 @@ NULL
                 options |= CLIENT_TRACKING_OPTOUT;
             } else if (!strcasecmp(c->argv[j]->ptr,"noloop")) {
                 options |= CLIENT_TRACKING_NOLOOP;
+            } else if (!strcasecmp(c->argv[j]->ptr,"subkey")) {
+                options |= CLIENT_TRACKING_SUBKEY;
+            } else if (!strcasecmp(c->argv[j]->ptr,"invalidateoff")) {
+                options |= CLIENT_TRACKING_INVALIDATEOFF;
+            } else if (!strcasecmp(c->argv[j]->ptr,"prefixreset")) {
+                cmd_options |= CLIENT_TRACKING_PREFIXRESET;
             } else if (!strcasecmp(c->argv[j]->ptr,"prefix") && moreargs) {
                 j++;
                 prefix = zrealloc(prefix,sizeof(robj*)*(numprefix+1));
                 prefix[numprefix++] = c->argv[j];
+            } else if (!strcasecmp(c->argv[j]->ptr,"heartbeat") && (moreargs >= 2)) {
+                /* heartbeat [systime period] [mkps period] */
+                int hasValidOption = 0;
+                /* Parse the options. */
+                j++;
+                moreargs = (c->argc-1) - j;
+
+                while (moreargs > 0) {
+                    if (!strcasecmp(c->argv[j]->ptr,"systime") && moreargs >= 1) {
+                        /* Check for duplicate systime option */
+                        if (options & CLIENT_TRACKING_HEARTBEAT_SYSTIME) {
+                            zfree(prefix);
+                            addReplyError(c,"Duplicate systime option in heartbeat");
+                            return;
+                        }
+                        options |= CLIENT_TRACKING_HEARTBEAT_SYSTIME;
+                        j++;
+                        if (getLongLongFromObjectOrReply(c,c->argv[j],&heartbeat_period[HEARTBEAT_SYSTIME_IDX],
+                            "Systime period is not an integer or out of range") != C_OK) {
+                            zfree(prefix);
+                            return;
+                        }
+                        if (heartbeat_period[HEARTBEAT_SYSTIME_IDX] <= 0) {
+                            addReplyError(c,"The systime period is less than 1 second");
+                            zfree(prefix);
+                            return;
+                        }
+                        j++;
+                        hasValidOption = 1;
+                        moreargs = (c->argc-1) - j;
+                    } else if (!strcasecmp(c->argv[j]->ptr,"mkps") && moreargs >= 1) {
+                        /* Check for duplicate mkps option */
+                        if (options & CLIENT_TRACKING_HEARTBEAT_MKPS) {
+                            addReplyError(c,"Duplicate mkps option in heartbeat");
+                            zfree(prefix);
+                            return;
+                        }
+                        options |= CLIENT_TRACKING_HEARTBEAT_MKPS;
+                        j++;
+                        if (getLongLongFromObjectOrReply(c,c->argv[j],&heartbeat_period[HEARTBEAT_MKPS_IDX],
+                            "Mkps period is not an integer or out of range") != C_OK) {
+                            zfree(prefix);
+                            return;
+                        }
+                        if (heartbeat_period[HEARTBEAT_MKPS_IDX] <= 0) {
+                            addReplyError(c,"The Mkps period is less than 1 second");
+                            zfree(prefix);
+                            return;
+                        }
+                        j++;
+                        hasValidOption = 1;
+                        moreargs = (c->argc-1) - j;
+                    } else {
+                        /* Encountered a non-heartbeat parameter, stop parsing */
+                        break;
+                    }
+                }
+                
+                /* Check if at least one valid heartbeat option was provided */
+                if (!hasValidOption) {
+                    zfree(prefix);
+                    addReplyError(c,"Heartbeat requires at least one valid option: systime or mkps");
+                    return;
+                }
+                
+                /* After parsing heartbeat options, j points to the next unprocessed parameter.
+                 * We need to backtrack j so the outer for loop's j++ will correctly 
+                 * position j at this parameter. */
+                if (hasValidOption) {
+                    j--;
+                }
             } else {
                 zfree(prefix);
                 addReplyErrorObject(c,shared.syntaxerr);
@@ -4033,6 +4136,14 @@ NULL
         if (!strcasecmp(c->argv[2]->ptr,"on")) {
             /* Before enabling tracking, make sure options are compatible
              * among each other and with the current state of the client. */
+
+            if ((cmd_options & CLIENT_TRACKING_PREFIXRESET) && !(options & CLIENT_TRACKING_BCAST)) {
+                addReplyError(c,
+                    "You can't reset prefixes without BCAST option");
+                zfree(prefix);
+                return;
+            }
+            
             if (!(options & CLIENT_TRACKING_BCAST) && numprefix) {
                 addReplyError(c,
                     "PREFIX option requires BCAST mode to be enabled");
@@ -4081,6 +4192,10 @@ NULL
                 return;
             }
 
+            if ((cmd_options & CLIENT_TRACKING_PREFIXRESET) && (c->flags & CLIENT_TRACKING_BCAST)) {
+                trackingBroadcastClearAllPrefixes(c);
+            }
+
             if (options & CLIENT_TRACKING_BCAST) {
                 if (!checkPrefixCollisionsOrReply(c,prefix,numprefix)) {
                     zfree(prefix);
@@ -4088,9 +4203,25 @@ NULL
                 }
             }
 
+            if (!(options & CLIENT_TRACKING_BCAST) && (options & CLIENT_TRACKING_INVALIDATEOFF)) {
+                addReplyError(c,
+                    "You can't set invalidateoff mode without bcast mode.");
+                    zfree(prefix);
+                    return;
+            }
+
+            if (!((c->flags & CLIENT_TRACKING_BCAST) || (options & CLIENT_TRACKING_BCAST)) && 
+                (options & (CLIENT_TRACKING_HEARTBEAT_SYSTIME | CLIENT_TRACKING_HEARTBEAT_MKPS))) {
+                addReplyError(c,"Heartbeat is only supported for tracking bcast mode");
+                zfree(prefix);
+                return;
+            }
+
             enableTracking(c,redir,options,prefix,numprefix);
+            ctripTryEnableHeartbeat(c,options,heartbeat_period);
         } else if (!strcasecmp(c->argv[2]->ptr,"off")) {
             disableTracking(c);
+            ctripTryDisableHeartbeat(c);
         } else {
             zfree(prefix);
             addReplyErrorObject(c,shared.syntaxerr);
@@ -4510,6 +4641,7 @@ size_t getClientMemoryUsage(client *c, size_t *output_buffer_mem_usage) {
  * CLIENT_TYPE_NORMAL -> Normal client, including MONITOR
  * CLIENT_TYPE_SLAVE  -> Slave
  * CLIENT_TYPE_PUBSUB -> Client subscribed to Pub/Sub channels
+ * CLIENT_TYPE_TRACKING -> Client tracking on
  * CLIENT_TYPE_MASTER -> The client representing our replication master.
  */
 int getClientType(client *c) {
@@ -4519,6 +4651,7 @@ int getClientType(client *c) {
     if ((c->flags & CLIENT_SLAVE) && !(c->flags & CLIENT_MONITOR))
         return CLIENT_TYPE_SLAVE;
     if (c->flags & CLIENT_PUBSUB) return CLIENT_TYPE_PUBSUB;
+    if (c->flags & CLIENT_TRACKING) return CLIENT_TYPE_TRACKING;
     return CLIENT_TYPE_NORMAL;
 }
 
@@ -4535,6 +4668,7 @@ int getClientTypeByName(char *name) {
     else if (!strcasecmp(name,"slave")) return CLIENT_TYPE_SLAVE;
     else if (!strcasecmp(name,"replica")) return CLIENT_TYPE_SLAVE;
     else if (!strcasecmp(name,"pubsub")) return CLIENT_TYPE_PUBSUB;
+    else if (!strcasecmp(name,"tracking")) return CLIENT_TYPE_TRACKING;
     else if (!strcasecmp(name,"master")) return CLIENT_TYPE_MASTER;
     else return -1;
 }
@@ -4544,6 +4678,7 @@ char *getClientTypeName(int class) {
     case CLIENT_TYPE_NORMAL: return "normal";
     case CLIENT_TYPE_SLAVE:  return "slave";
     case CLIENT_TYPE_PUBSUB: return "pubsub";
+    case CLIENT_TYPE_TRACKING: return "tracking";
     case CLIENT_TYPE_MASTER: return "master";
     default:                       return NULL;
     }
@@ -4880,8 +5015,7 @@ void evictClients(void) {
     size_t client_eviction_limit = getClientEvictionLimit();
     if (client_eviction_limit == 0)
         return;
-    while (server.stat_clients_type_memory[CLIENT_TYPE_NORMAL] +
-           server.stat_clients_type_memory[CLIENT_TYPE_PUBSUB] >= client_eviction_limit) {
+    while (server.stat_clients_type_memory[CLIENT_TYPE_TRACKING] >= client_eviction_limit) {
         listNode *ln = listNext(&bucket_iter);
         if (ln) {
             client *c = ln->value;

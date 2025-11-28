@@ -442,9 +442,13 @@ extern int configOOMScoreAdjValuesDefaults[CONFIG_OOM_COUNT];
 #define CLIENT_REPL_RDB_CHANNEL (1ULL<<51)      /* Client which is used for rdb delivery as part of rdb channel replication */
 #define CLIENT_INTERNAL (1ULL<<52) /* Internal client connection */
 /* 1ULL<<53 ~ 1ULL<<59 CLIENT_SWAP_xx flag  */
-#define CLIENT_HEARTBEAT_SYSTIME (1ULL<<60) /* Heartbeat with systime. */
-#define CLIENT_HEARTBEAT_MKPS (1ULL<<61) /* Heartbeat with mkps(modified keys per second). */
+#define CLIENT_TRACKING_HEARTBEAT_SYSTIME (1ULL<<60) /* Heartbeat with systime. */
+#define CLIENT_TRACKING_HEARTBEAT_MKPS (1ULL<<61) /* Heartbeat with mkps(modified keys per second). */
 #define CLIENT_TRACKING_SUBKEY (1ULL<<62) /* Tracking in subkey mode. */
+#define CLIENT_TRACKING_INVALIDATEOFF (1ULL<<63) /* Tracking without sending invalidate messages. */
+
+/* Client command options, used for clientCommand, and will not be stored in c->flags. */
+#define CLIENT_TRACKING_PREFIXRESET (1ULL<<0)
 
 /* Any flag that does not let optimize FLUSH SYNC to run it in bg as blocking client ASYNC */
 #define CLIENT_AVOID_BLOCKING_ASYNC_FLUSH (CLIENT_DENY_BLOCKING|CLIENT_MULTI|CLIENT_LUA_DEBUG|CLIENT_LUA_DEBUG_SYNC|CLIENT_MODULE)
@@ -502,11 +506,12 @@ typedef enum blocking_type {
 #define CLIENT_TYPE_NORMAL 0 /* Normal req-reply clients + MONITORs */
 #define CLIENT_TYPE_SLAVE 1  /* Slaves. */
 #define CLIENT_TYPE_PUBSUB 2 /* Clients subscribed to PubSub channels. */
-#define CLIENT_TYPE_MASTER 3 /* Master. */
-#define CLIENT_TYPE_COUNT 4  /* Total number of client types. */
-#define CLIENT_TYPE_OBUF_COUNT 3 /* Number of clients to expose to output
+#define CLIENT_TYPE_TRACKING 3 /* Clients with tracking on. */
+#define CLIENT_TYPE_MASTER 4 /* Master. */
+#define CLIENT_TYPE_COUNT 5  /* Total number of client types. */
+#define CLIENT_TYPE_OBUF_COUNT 4 /* Number of clients to expose to output
                                     buffer configuration. Just the first
-                                    three: normal, slave, pubsub. */
+                                    four: normal, slave, pubsub, tracking. */
 
 /* Slave replication state. Used in server.repl_state for slaves to remember
  * what to do next. */
@@ -2262,6 +2267,9 @@ struct redisServer {
     size_t tracking_table_max_keys; /* Max number of keys in tracking table. */
     list *tracking_pending_keys; /* tracking invalidation keys pending to flush */
     list *pending_push_messages; /* pending publish or other push messages to flush */
+    unsigned int max_tracking_clients_to_write; /* max number of tracking clients to handle in one process of clients writing. */
+    /* Client with heartbeat. */
+    unsigned int heartbeat_clients;  /* # of clients with heartbeat enabled.*/
     /* Sort parameters - qsort_r() is only available under BSD so we
      * have to take this state global, in order to pass it to sortCompare() */
     int sort_desc;
@@ -2414,6 +2422,10 @@ struct redisServer {
     int importing_evict_policy; /* only support fifo now */
     list *importing_evict_queue;
     unsigned int importing_gc_batch_size;
+
+    sds *dirty_subkeys;
+    size_t *dirty_sublens;
+    size_t dirty_cap;
 };
 
 /* we use 6 so that all getKeyResult fits a cacheline */
@@ -3090,11 +3102,19 @@ void addReplyErrorFormat(client *c, const char *fmt, ...);
 void addReplyStatusFormat(client *c, const char *fmt, ...);
 #endif
 
+/*
+ * info about the key tracked during one write operation from client.
+ */
+typedef struct keyTrackingAttr {
+    int subkey_num;
+    sds *subkeys; /* own to the caller, life cycle exceed this structure. */
+} keyTrackingAttr;
+
 /* Client side caching (tracking mode) */
 void enableTracking(client *c, uint64_t redirect_to, uint64_t options, robj **prefix, size_t numprefix);
 void disableTracking(client *c);
 void trackingRememberKeys(client *tracking, client *executing);
-void trackingInvalidateKey(client *c, robj *keyobj, int bcast);
+void trackingInvalidateKey(client *c, robj *keyobj, keyTrackingAttr *attr, int bcast);
 void trackingScheduleKeyInvalidation(uint64_t client_id, robj *keyobj);
 void trackingHandlePendingKeyInvalidations(void);
 void trackingInvalidateKeysOnFlush(int async);
@@ -3107,6 +3127,7 @@ uint64_t trackingGetTotalKeys(void);
 uint64_t trackingGetTotalPrefixes(void);
 void trackingBroadcastInvalidationMessages(void);
 int checkPrefixCollisionsOrReply(client *c, robj **prefix, size_t numprefix);
+void trackingBroadcastClearAllPrefixes(client *c);
 
 /* List data type */
 void listTypePush(robj *subject, robj *value, int where);
@@ -3845,6 +3866,7 @@ void discardTempDb(redisDb *tempDb);
 
 int selectDb(client *c, int id);
 void signalModifiedKey(client *c, redisDb *db, robj *key);
+void signalModifiedKeyWithSubkeys(client *c, redisDb *db, robj *key, int subkey_num, sds *subkeys);
 void signalFlushedDb(int dbid, int async);
 void scanGenericCommand(client *c, robj *o, unsigned long long cursor);
 int parseScanCursorOrReply(client *c, robj *o, unsigned long long *cursor);
@@ -3960,6 +3982,10 @@ void updateStatsOnUnblock(client *c, long blocked_us, long reply_us, int had_err
 void scanDatabaseForDeletedKeys(redisDb *emptied, redisDb *replaced_with);
 void totalNumberOfStatefulKeys(unsigned long *blocking_keys, unsigned long *bloking_keys_on_nokey, unsigned long *watched_keys);
 void blockedBeforeSleep(void);
+
+/* metrics */
+void trackInstantaneousMetric(int metric, long long current_value, long long current_base, long long factor);
+long long getInstantaneousMetric(int metric);
 
 /* timeout.c -- Blocked clients timeout and connections timeout. */
 void addClientToTimeoutTable(client *c);

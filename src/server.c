@@ -1023,7 +1023,7 @@ int clientEvictionAllowed(client *c) {
         return 0;
     }
     int type = getClientType(c);
-    return (type == CLIENT_TYPE_NORMAL || type == CLIENT_TYPE_PUBSUB);
+    return (type == CLIENT_TYPE_TRACKING);
 }
 
 
@@ -1525,6 +1525,7 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
                                  current_time, factor);
         trackInstantaneousMetric(STATS_METRIC_EL_DURATION, server.duration_stats[EL_DURATION_TYPE_EL].sum,
                                  server.duration_stats[EL_DURATION_TYPE_EL].cnt, 1);
+        trackInstantaneousMetricForBcastPrefixes();
 #ifdef ENABLE_SWAP
         trackSwapInstantaneousMetrics(current_time, factor);
 #endif
@@ -1711,6 +1712,10 @@ int serverCron(struct aeEventLoop *eventLoop, long long id, void *clientData) {
      * executed changes the value via CONFIG SET, the server will perform
      * the operation even if completely idle. */
     if (server.tracking_clients) trackingLimitUsedSlots();
+
+    run_with_period(1000) {
+        if (server.heartbeat_clients) ctripHeartbeat();
+    }
 
     /* Start a scheduled BGSAVE if the corresponding flag is set. This is
      * useful when we are forced to postpone a BGSAVE because an AOF
@@ -1964,7 +1969,7 @@ void beforeSleep(struct aeEventLoop *eventLoop) {
 
     /* Run a fast expire cycle (the called function will return
      * ASAP if a fast cycle is not needed). */
-    if (server.active_expire_enabled && !isImportingExpireDisabled() && iAmMaster())
+    if (server.active_expire_enabled && !isImportingExpireDisabled() && server.masterhost == NULL)
         activeExpireCycle(ACTIVE_EXPIRE_CYCLE_FAST);
 
     if (moduleCount()) {
@@ -3116,6 +3121,10 @@ void initServer(void) {
     server.acl_info.invalid_key_accesses  = 0;
     server.acl_info.user_auth_failures = 0;
     server.acl_info.invalid_channel_accesses = 0;
+
+    server.dirty_subkeys = NULL;
+    server.dirty_sublens = NULL;
+    server.dirty_cap = 0;
 
     /* Create the timer callback, this is our way to process many background
      * operations incrementally, like clients timeout, eviction of unaccessed
@@ -6355,6 +6364,7 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             "client_recent_max_output_buffer:%zu\r\n", maxout,
             "blocked_clients:%d\r\n", server.blocked_clients,
             "tracking_clients:%d\r\n", server.tracking_clients,
+            "heartbeat_clients:%d\r\n", server.heartbeat_clients,
             "pubsub_clients:%d\r\n", server.pubsub_clients,
             "watching_clients:%d\r\n", server.watching_clients,
             "clients_in_timeout_table:%llu\r\n", (unsigned long long) raxSize(server.clients_timeout_table),
@@ -6680,7 +6690,11 @@ sds genRedisInfoString(dict *section_dict, int all_sections, int everything) {
             "eventloop_duration_sum:%llu\r\n", server.duration_stats[EL_DURATION_TYPE_EL].sum,
             "eventloop_duration_cmd_sum:%llu\r\n", server.duration_stats[EL_DURATION_TYPE_CMD].sum,
             "instantaneous_eventloop_cycles_per_sec:%llu\r\n", getInstantaneousMetric(STATS_METRIC_EL_CYCLE),
-            "instantaneous_eventloop_duration_usec:%llu\r\n", getInstantaneousMetric(STATS_METRIC_EL_DURATION)));
+            "instantaneous_eventloop_duration_usec:%llu\r\n", getInstantaneousMetric(STATS_METRIC_EL_DURATION),
+            "importing:status=%d,", server.importing_end_time > server.mstime,
+            "ttl=%lld,", importingTtl()/1000,
+            "expire=%d,", !isImportingExpireDisabled(),
+            "fifo_evict=%d\r\n", isImportingFifoEnabled()));
         info = genRedisInfoStringACLStats(info);
         if (!server.cluster_enabled && server.cluster_compatibility_sample_ratio) {
             info = sdscatprintf(info, "cluster_incompatible_ops:%lld\r\n", server.stat_cluster_incompatible_ops);

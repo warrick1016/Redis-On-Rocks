@@ -2113,11 +2113,11 @@ void hsetnxCommand(client *c) {
     hashTypeTryConversion(c->db, kv, c->argv, 2, 3);
     hashTypeSet(c->db, kv, c->argv[2]->ptr, c->argv[3]->ptr, HASH_SET_COPY);
     addReply(c, shared.cone);
-    signalModifiedKey(c,c->db,c->argv[1]);
+    sds dirty_subkeys[1] = {(sds)c->argv[2]->ptr};
+    signalModifiedKeyWithSubkeys(c,c->db,c->argv[1],1,dirty_subkeys);
 #ifdef ENABLE_SWAP
-        sds dirty_subkeys[1] = {(sds)c->argv[2]->ptr};
-        size_t dirty_sublens[1] = {sdslen(c->argv[3]->ptr)};
-        notifyKeyspaceEventDirtySubkeys(NOTIFY_HASH,"hset",c->argv[1],
+    size_t dirty_sublens[1] = {sdslen(c->argv[3]->ptr)};
+    notifyKeyspaceEventDirtySubkeys(NOTIFY_HASH,"hset",c->argv[1],
                 c->db->id,kv,1,dirty_subkeys, dirty_sublens);
 #else
     notifyKeyspaceEvent(NOTIFY_HASH,"hset",c->argv[1],c->db->id);
@@ -2138,21 +2138,18 @@ void hsetCommand(client *c) {
 
     if ((kv = hashTypeLookupWriteOrCreate(c,c->argv[1])) == NULL) return;
     hashTypeTryConversion(c->db, kv, c->argv, 2, c->argc-1);
-#ifdef ENABLE_SWAP
+
     size_t ndss = (c->argc-2)/2;
-    sds *dirty_subkeys = zmalloc(sizeof(sds)*ndss);
-    size_t *dirty_sublens = zmalloc(sizeof(size_t)*ndss);
-#endif
+    dirtyArraysTryAlloc(ndss);
+    sds *dirty_subkeys = dirtyArraysSubkeys();
+    size_t *dirty_sublens = dirtyArraysSublens();
+
     for (i = 2; i < c->argc; i += 2)
-#ifdef ENABLE_SWAP
     {
         created += !hashTypeSet(c->db, kv, c->argv[i]->ptr, c->argv[i+1]->ptr, HASH_SET_COPY);
         dirty_subkeys[(i-2)/2] = (sds)c->argv[i]->ptr;
         dirty_sublens[(i-2)/2] = sdslen(c->argv[i+1]->ptr);
     }
-#else
-        created += !hashTypeSet(c->db, kv, c->argv[i]->ptr, c->argv[i+1]->ptr, HASH_SET_COPY);
-#endif
     /* HMSET (deprecated) and HSET return value is different. */
     char *cmdname = c->argv[0]->ptr;
     if (cmdname[1] == 's' || cmdname[1] == 'S') {
@@ -2162,14 +2159,12 @@ void hsetCommand(client *c) {
         /* HMSET */
         addReply(c, shared.ok);
     }
-    signalModifiedKey(c,c->db,c->argv[1]);
+    signalModifiedKeyWithSubkeys(c,c->db,c->argv[1],ndss,dirty_subkeys);
     unsigned long l = hashTypeLength(kv, 0);
     updateKeysizesHist(c->db, getKeySlot(c->argv[1]->ptr), OBJ_HASH, l - created, l);
 #ifdef ENABLE_SWAP
     notifyKeyspaceEventDirtySubkeys(NOTIFY_HASH,"hset",c->argv[1],
             c->db->id,kv,ndss,dirty_subkeys,dirty_sublens);
-    zfree(dirty_subkeys);
-    zfree(dirty_sublens);
 #else    
     notifyKeyspaceEvent(NOTIFY_HASH,"hset",c->argv[1],c->db->id);
 #endif
@@ -2530,7 +2525,7 @@ void hincrbyCommand(client *c) {
     new = sdsfromlonglong(value);
     hashTypeSet(c->db, o,c->argv[2]->ptr,new,HASH_SET_TAKE_VALUE | HASH_SET_KEEP_TTL);
     addReplyLongLong(c,value);
-    signalModifiedKey(c,c->db,c->argv[1]);
+    signalModifiedKeyWithSubkeys(c,c->db,c->argv[1],1,(sds*)&c->argv[2]->ptr);
 #ifdef ENABLE_SWAP
     sds dirty_subkeys[1] = {(sds)c->argv[2]->ptr};
     size_t dirty_sublens[1] = {sizeof(long long)};
@@ -2590,7 +2585,7 @@ void hincrbyfloatCommand(client *c) {
     new = sdsnewlen(buf,len);
     hashTypeSet(c->db, o,c->argv[2]->ptr,new,HASH_SET_TAKE_VALUE | HASH_SET_KEEP_TTL);
     addReplyBulkCBuffer(c,buf,len);
-    signalModifiedKey(c,c->db,c->argv[1]);
+    signalModifiedKeyWithSubkeys(c,c->db,c->argv[1],1,(sds*)&c->argv[2]->ptr);
 #ifdef ENABLE_SWAP
     sds dirty_subkeys[1] = {(sds)c->argv[2]->ptr};
     size_t dirty_sublens[1] = {sizeof(long double)};
@@ -2930,6 +2925,9 @@ void hdelCommand(client *c) {
     if ((o = lookupKeyWriteOrReply(c,c->argv[1],shared.czero)) == NULL ||
         checkType(c,o,OBJ_HASH)) return;
 
+    dirtyArraysTryAlloc(c->argc - 2);
+    sds *dirty_subkeys = dirtyArraysSubkeys();
+
     int64_t oldLen = (int64_t) hashTypeLength(o, 0);
     
     /* Hash field expiration is optimized to avoid frequent update global HFE DS for
@@ -2942,6 +2940,7 @@ void hdelCommand(client *c) {
 
     for (j = 2; j < c->argc; j++) {
         if (hashTypeDelete(o,c->argv[j]->ptr,1)) {
+            dirty_subkeys[deleted] = c->argv[j]->ptr;
             deleted++;
 #ifdef ENABLE_SWAP
             if (hashTypeLength(o, 0) == 0
@@ -2958,7 +2957,11 @@ void hdelCommand(client *c) {
     }
     if (deleted) {
         int64_t newLen = -1; /* The value -1 indicates that the key is deleted. */
-        signalModifiedKey(c,c->db,c->argv[1]);
+        if (keyremoved) {
+            signalModifiedKey(c,c->db,c->argv[1]);
+        } else {
+            signalModifiedKeyWithSubkeys(c,c->db,c->argv[1],deleted,dirty_subkeys);
+        }
 #ifdef ENABLE_SWAP
         if (keyremoved) {
             notifyKeyspaceEvent(NOTIFY_HASH,"hdel",c->argv[1],c->db->id);

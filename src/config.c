@@ -203,7 +203,8 @@ swapBatchLimitsConfig swapBatchLimitsDefaults[SWAP_TYPES] = {
 clientBufferLimitsConfig clientBufferLimitsDefaults[CLIENT_TYPE_OBUF_COUNT] = {
     {0, 0, 0}, /* normal */
     {1024*1024*256, 1024*1024*64, 60}, /* slave */
-    {1024*1024*32, 1024*1024*8, 60}  /* pubsub */
+    {1024*1024*32, 1024*1024*8, 60},  /* pubsub */
+    {1024*1024*32, 1024*1024*8, 60}  /* tracking */
 };
 
 /* OOM Score defaults */
@@ -3686,8 +3687,8 @@ standardConfig static_configs[] = {
     createIntConfig("rocksdb.data.level0_file_num_compaction_trigger", "rocksdb.level0_file_num_compaction_trigger", MODIFIABLE_CONFIG, 0, INT_MAX, server.rocksdb_data_level0_file_num_compaction_trigger, 4, INTEGER_CONFIG, NULL, updateRocksdbDataLevel0FileNumCompactionTrigger),
     createIntConfig("rocksdb.meta.level0_file_num_compaction_trigger", NULL, MODIFIABLE_CONFIG, 0, INT_MAX, server.rocksdb_meta_level0_file_num_compaction_trigger, 4, INTEGER_CONFIG, NULL, updateRocksdbMetaLevel0FileNumCompactionTrigger),
 #endif
-
     /* Unsigned int configs */
+    createUIntConfig("max-tracking-clients-to-write", NULL, MODIFIABLE_CONFIG, 1, UINT_MAX, server.max_tracking_clients_to_write, 16, INTEGER_CONFIG, NULL, NULL),
     createUIntConfig("maxclients", NULL, MODIFIABLE_CONFIG, 1, UINT_MAX, server.maxclients, 10000, INTEGER_CONFIG, NULL, updateMaxclients),
     createUIntConfig("unixsocketperm", NULL, IMMUTABLE_CONFIG, 0, 0777, server.unixsocketperm, 0, OCTAL_CONFIG, NULL, NULL),
     createUIntConfig("socket-mark-id", NULL, IMMUTABLE_CONFIG, 0, UINT_MAX, server.socket_mark_id, 0, INTEGER_CONFIG, NULL, NULL),
@@ -3696,6 +3697,7 @@ standardConfig static_configs[] = {
 #ifdef LOG_REQ_RES
     createUIntConfig("client-default-resp", NULL, IMMUTABLE_CONFIG | HIDDEN_CONFIG, 2, 3, server.client_default_resp, 2, INTEGER_CONFIG, NULL, NULL),
 #endif
+    createUIntConfig("importing-gc-batch-size", NULL, MODIFIABLE_CONFIG, 1, UINT_MAX, server.importing_gc_batch_size, 1024, INTEGER_CONFIG, NULL, NULL),
 
     /* Unsigned Long configs */
     createULongConfig("active-defrag-max-scan-fields", NULL, MODIFIABLE_CONFIG, 1, LONG_MAX, server.active_defrag_max_scan_fields, 1000, INTEGER_CONFIG, NULL, NULL), /* Default: keys with more than 1000 fields will be processed separately */
@@ -3770,7 +3772,7 @@ standardConfig static_configs[] = {
     createSizeTConfig("hll-sparse-max-bytes", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.hll_sparse_max_bytes, 3000, MEMORY_CONFIG, NULL, NULL),
     createSizeTConfig("tracking-table-max-keys", NULL, MODIFIABLE_CONFIG, 0, LONG_MAX, server.tracking_table_max_keys, 1000000, INTEGER_CONFIG, NULL, NULL), /* Default: 1 million keys max. */
     createSizeTConfig("client-query-buffer-limit", NULL, DEBUG_CONFIG | MODIFIABLE_CONFIG, 1024*1024, LONG_MAX, server.client_max_querybuf_len, 1024*1024*1024, MEMORY_CONFIG, NULL, NULL), /* Default: 1GB max query buffer. */
-    createSSizeTConfig("maxmemory-clients", NULL, MODIFIABLE_CONFIG, -100, SSIZE_MAX, server.maxmemory_clients, 0, MEMORY_CONFIG | PERCENT_CONFIG, NULL, applyClientMaxMemoryUsage),
+    createSSizeTConfig("maxmemory-clients", NULL, MODIFIABLE_CONFIG, -100, SSIZE_MAX, server.maxmemory_clients, 512*1024*1024, MEMORY_CONFIG | PERCENT_CONFIG, NULL, applyClientMaxMemoryUsage),
 #ifdef ENABLE_SWAP
     createSizeTConfig("swap-bitmap-subkey-size", NULL, MODIFIABLE_CONFIG, 256, 16*1024, server.swap_bitmap_subkey_size, 4*1024, MEMORY_CONFIG, NULL, NULL), /* Default: 4096 bytes. */
 #endif
