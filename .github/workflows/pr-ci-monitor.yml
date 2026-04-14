@@ -1,0 +1,42 @@
+name: PR CI Monitor
+
+on:
+  schedule:
+    - cron: "*/5 * * * *"
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to monitor"
+        required: false
+        default: "14"
+
+permissions:
+  actions: write
+  contents: read
+  issues: write
+  pull-requests: read
+
+concurrency:
+  group: pr-ci-monitor-${{ github.event.inputs.pr_number || '14' }}
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Monitor PR CI
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          PR_NUMBER_INPUT: ${{ github.event.inputs.pr_number }}
+          TARGET_WORKFLOW_NAME: CI
+          TARGET_PHRASE: "couldn't open socket: connection refused"
+        run: |
+          export PR_NUMBER="${PR_NUMBER_INPUT:-14}"
+          python3 .github/scripts/pr_ci_monitor.py
