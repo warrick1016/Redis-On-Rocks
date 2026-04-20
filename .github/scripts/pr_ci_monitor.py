@@ -48,6 +48,10 @@ MONITOR_WORKFLOW_FILE = os.environ.get("MONITOR_WORKFLOW_FILE", "")
 MONITOR_WORKFLOW_REF = os.environ.get(
     "MONITOR_WORKFLOW_REF", os.environ.get("GITHUB_REF_NAME", "")
 )
+PASSIVE_COMPLETION_MONITOR = os.environ.get("PASSIVE_COMPLETION_MONITOR") == "1"
+PASSIVE_POLL_INTERVAL_MINUTES = int(
+    os.environ.get("PASSIVE_POLL_INTERVAL_MINUTES", "20")
+)
 ENABLE_CI_WORKFLOW_DISPATCH_RECOVERY = (
     os.environ.get("ENABLE_CI_WORKFLOW_DISPATCH_RECOVERY") == "1"
 )
@@ -443,6 +447,27 @@ def parse_state(comment):
     return default
 
 
+def progress_summary(state):
+    completed = int(state.get("completed_rounds", 0))
+    if PASSIVE_COMPLETION_MONITOR:
+        return f"recorded `{completed}` completed CI attempt(s) in this session"
+    return f"`{completed}/{MIN_ROUNDS}`"
+
+
+def passive_monitoring_note():
+    return (
+        "Passive monitoring mode is enabled; no CI rerun, workflow_dispatch recovery, "
+        "PR reopen recovery, monitor self-dispatch, or CI cancellation was requested."
+    )
+
+
+def passive_polling_wait_note():
+    return (
+        f"Passive monitoring mode is enabled; the next scheduled check runs about every "
+        f"{PASSIVE_POLL_INTERVAL_MINUTES} minute(s)."
+    )
+
+
 def upsert_state_comment(client, pr_number, comment, state, run, state_jobs, note):
     body = build_state_comment_body(pr_number, state, run, state_jobs, note)
     if comment:
@@ -480,11 +505,27 @@ def build_state_comment_body(pr_number, state, run, state_jobs, note):
         f"- Session: `{SESSION_ID}`",
         f"- Trigger: {TRIGGER_DESCRIPTION}",
         "- This workflow is **not** long-running; GitHub starts a fresh monitor run on each trigger, then exits.",
-        "- This session follows PR-level CI activity across reruns and new commits.",
-        f"- Progress: `{state.get('completed_rounds', 0)}/{MIN_ROUNDS}`",
+        (
+            "- Passive mode: enabled; this monitor only records newly completed CI attempts "
+            "and never triggers reruns or recovery workflows."
+            if PASSIVE_COMPLETION_MONITOR
+            else "- This session follows PR-level CI activity across reruns and new commits."
+        ),
+        (
+            "- This session passively records newly completed PR-level CI attempts across "
+            "reruns and new commits."
+            if PASSIVE_COMPLETION_MONITOR
+            else f"- Progress: {progress_summary(state)}"
+        ),
+    ]
+    if PASSIVE_COMPLETION_MONITOR:
+        lines.append(f"- Progress: {progress_summary(state)}")
+    lines.extend(
+        [
         f"- Latest action: {state.get('last_action', 'n/a')}",
         f"- Note: {note}",
-    ]
+        ]
+    )
 
     if run:
         lines.append(
@@ -1064,7 +1105,7 @@ def dispatch_ci_workflow_for_recovery(client, pr, state):
 
 
 def process_completed_runs_for_pr(client, run, state, state_comment, comments):
-    if int(state.get("completed_rounds", 0)) >= MIN_ROUNDS:
+    if not PASSIVE_COMPLETION_MONITOR and int(state.get("completed_rounds", 0)) >= MIN_ROUNDS:
         return False
     if run.get("status") != "completed":
         return False
@@ -1090,9 +1131,12 @@ def process_completed_runs_for_pr(client, run, state, state_comment, comments):
 
     note = (
         f"Processed CI run `{run['id']}` attempt `{attempt}` "
-        f"as round `{round_number}/{MIN_ROUNDS}`."
+        f"as recorded item `{round_number}` in this session."
     )
-    if round_number < MIN_ROUNDS:
+    if PASSIVE_COMPLETION_MONITOR:
+        state["last_action"] = "recorded completed CI run"
+        note += f" {passive_monitoring_note()}"
+    elif round_number < MIN_ROUNDS:
         client.rerun_workflow(run["id"])
         remember_rerun_request(state, run_attempt)
         state["last_action"] = f"requested CI rerun after round {round_number}"
@@ -1141,12 +1185,15 @@ def main():
             return 0
         follow_up_note = ""
         if reason and "No matching CI workflow run found" in reason:
-            follow_up_note = " " + queue_follow_up_monitor_if_needed(
-                client,
-                state,
-                f"no-run:{pr['head']['sha']}",
-                f"wait-for-ci-run:{pr['head']['sha']}",
-            )
+            if PASSIVE_COMPLETION_MONITOR:
+                follow_up_note = " " + passive_polling_wait_note()
+            else:
+                follow_up_note = " " + queue_follow_up_monitor_if_needed(
+                    client,
+                    state,
+                    f"no-run:{pr['head']['sha']}",
+                    f"wait-for-ci-run:{pr['head']['sha']}",
+                )
         state["last_action"] = "no-op"
         upsert_state_comment(
             client,
@@ -1160,7 +1207,9 @@ def main():
         return 0
 
     latest_run = find_latest_ci_run_for_pr(client, pr)
-    cancelled_runs = cancel_outdated_ci_runs(client, pr, latest_run)
+    cancelled_runs = []
+    if not PASSIVE_COMPLETION_MONITOR:
+        cancelled_runs = cancel_outdated_ci_runs(client, pr, latest_run)
     cancelled_note = ""
     if cancelled_runs:
         cancelled_ids = ", ".join(f"`{item['id']}`" for item in cancelled_runs)
@@ -1168,11 +1217,15 @@ def main():
 
     if latest_run is None:
         state["last_action"] = "waiting for latest PR head CI run"
-        follow_up_note = queue_follow_up_monitor_if_needed(
-            client,
-            state,
-            f"latest-run-missing:{pr['head']['sha']}",
-            f"wait-for-latest-run:{pr['head']['sha']}",
+        follow_up_note = (
+            passive_polling_wait_note()
+            if PASSIVE_COMPLETION_MONITOR
+            else queue_follow_up_monitor_if_needed(
+                client,
+                state,
+                f"latest-run-missing:{pr['head']['sha']}",
+                f"wait-for-latest-run:{pr['head']['sha']}",
+            )
         )
         upsert_state_comment(
             client,
@@ -1237,11 +1290,15 @@ def main():
 
     if run.get("status") != "completed":
         state["last_action"] = "waiting for CI workflow completion"
-        follow_up_note = queue_follow_up_monitor_if_needed(
-            client,
-            state,
-            f"in-progress:{run_attempt}",
-            f"wait-for-ci-completion:{run['id']}:{attempt}",
+        follow_up_note = (
+            passive_polling_wait_note()
+            if PASSIVE_COMPLETION_MONITOR
+            else queue_follow_up_monitor_if_needed(
+                client,
+                state,
+                f"in-progress:{run_attempt}",
+                f"wait-for-ci-completion:{run['id']}:{attempt}",
+            )
         )
         upsert_state_comment(
             client,
@@ -1258,6 +1315,21 @@ def main():
         return 0
 
     if run_attempt in processed_run_attempts:
+        if PASSIVE_COMPLETION_MONITOR:
+            state["last_action"] = "waiting for newer completed CI run"
+            upsert_state_comment(
+                client,
+                TARGET_PR_NUMBER,
+                state_comment,
+                state,
+                run,
+                state_jobs,
+                (
+                    f"Run `{run['id']}` attempt `{attempt}` was already processed in this session."
+                    f"{cancelled_note} {passive_polling_wait_note()}"
+                ),
+            )
+            return 0
         if int(state.get("completed_rounds", 0)) < MIN_ROUNDS:
             if run.get("conclusion") == "startup_failure" and state.get("last_rerun_request_run_attempt") == run_attempt:
                 recovery_note = (
