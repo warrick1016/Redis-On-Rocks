@@ -52,6 +52,10 @@ PASSIVE_COMPLETION_MONITOR = os.environ.get("PASSIVE_COMPLETION_MONITOR") == "1"
 PASSIVE_POLL_INTERVAL_MINUTES = int(
     os.environ.get("PASSIVE_POLL_INTERVAL_MINUTES", "20")
 )
+ACTIVE_TRIGGER_IF_IDLE = os.environ.get("ACTIVE_TRIGGER_IF_IDLE") == "1"
+ACTIVE_TRIGGER_POLL_INTERVAL_MINUTES = int(
+    os.environ.get("ACTIVE_TRIGGER_POLL_INTERVAL_MINUTES", "30")
+)
 ENABLE_CI_WORKFLOW_DISPATCH_RECOVERY = (
     os.environ.get("ENABLE_CI_WORKFLOW_DISPATCH_RECOVERY") == "1"
 )
@@ -454,6 +458,42 @@ def progress_summary(state):
     return f"`{completed}/{MIN_ROUNDS}`"
 
 
+def active_polling_mode_enabled():
+    return PASSIVE_COMPLETION_MONITOR and ACTIVE_TRIGGER_IF_IDLE
+
+
+def current_event_supports_active_trigger():
+    return os.environ["GITHUB_EVENT_NAME"] in ("push", "schedule", "workflow_dispatch")
+
+
+def monitoring_mode_summary_line():
+    if active_polling_mode_enabled():
+        return (
+            "- Active polling mode: completed CI attempts are still recorded with per-job "
+            "snippets, and poll runs request a new CI attempt whenever this PR is idle."
+        )
+    if PASSIVE_COMPLETION_MONITOR:
+        return (
+            "- Passive mode: enabled; this monitor only records newly completed CI attempts "
+            "and never triggers reruns or recovery workflows."
+        )
+    return "- This session follows PR-level CI activity across reruns and new commits."
+
+
+def monitoring_mode_detail_line(state):
+    if active_polling_mode_enabled():
+        return (
+            f"- Progress: {progress_summary(state)}; scheduled checks run about every "
+            f"{ACTIVE_TRIGGER_POLL_INTERVAL_MINUTES} minute(s)."
+        )
+    if PASSIVE_COMPLETION_MONITOR:
+        return (
+            "- This session passively records newly completed PR-level CI attempts across "
+            "reruns and new commits."
+        )
+    return f"- Progress: {progress_summary(state)}"
+
+
 def passive_monitoring_note():
     return (
         "Passive monitoring mode is enabled; no CI rerun, workflow_dispatch recovery, "
@@ -461,10 +501,50 @@ def passive_monitoring_note():
     )
 
 
+def active_polling_note():
+    return (
+        "Active polling mode is enabled; completed CI runs still post per-job snippets, "
+        "and scheduled/manual polls request another CI attempt only when this PR is idle."
+    )
+
+
 def passive_polling_wait_note():
     return (
         f"Passive monitoring mode is enabled; the next scheduled check runs about every "
         f"{PASSIVE_POLL_INTERVAL_MINUTES} minute(s)."
+    )
+
+
+def active_polling_wait_note():
+    return (
+        f"Active polling mode is enabled; the next scheduled check runs about every "
+        f"{ACTIVE_TRIGGER_POLL_INTERVAL_MINUTES} minute(s)."
+    )
+
+
+def wait_note():
+    if active_polling_mode_enabled():
+        return active_polling_wait_note()
+    return passive_polling_wait_note()
+
+
+def maybe_trigger_idle_ci(client, state, run):
+    if not active_polling_mode_enabled():
+        return False, "Active polling mode is disabled."
+    if not current_event_supports_active_trigger():
+        return False, "This event only records results; active triggering waits for the next poll."
+
+    attempt = int(run.get("run_attempt", 1))
+    run_attempt = run_attempt_key(run["id"], attempt)
+    retry_needed, retry_reason = should_retry_processed_attempt(state, run_attempt)
+    if not retry_needed:
+        return False, f"{retry_reason} {active_polling_wait_note()}"
+
+    client.rerun_workflow(run["id"])
+    remember_rerun_request(state, run_attempt)
+    return True, (
+        f"{retry_reason} Requested another full CI rerun because no CI workflow is "
+        "currently running for this PR head."
     )
 
 
@@ -505,20 +585,10 @@ def build_state_comment_body(pr_number, state, run, state_jobs, note):
         f"- Session: `{SESSION_ID}`",
         f"- Trigger: {TRIGGER_DESCRIPTION}",
         "- This workflow is **not** long-running; GitHub starts a fresh monitor run on each trigger, then exits.",
-        (
-            "- Passive mode: enabled; this monitor only records newly completed CI attempts "
-            "and never triggers reruns or recovery workflows."
-            if PASSIVE_COMPLETION_MONITOR
-            else "- This session follows PR-level CI activity across reruns and new commits."
-        ),
-        (
-            "- This session passively records newly completed PR-level CI attempts across "
-            "reruns and new commits."
-            if PASSIVE_COMPLETION_MONITOR
-            else f"- Progress: {progress_summary(state)}"
-        ),
+        monitoring_mode_summary_line(),
+        monitoring_mode_detail_line(state),
     ]
-    if PASSIVE_COMPLETION_MONITOR:
+    if PASSIVE_COMPLETION_MONITOR and not active_polling_mode_enabled():
         lines.append(f"- Progress: {progress_summary(state)}")
     lines.extend(
         [
@@ -1135,7 +1205,11 @@ def process_completed_runs_for_pr(client, run, state, state_comment, comments):
     )
     if PASSIVE_COMPLETION_MONITOR:
         state["last_action"] = "recorded completed CI run"
-        note += f" {passive_monitoring_note()}"
+        note += f" {active_polling_note() if active_polling_mode_enabled() else passive_monitoring_note()}"
+        rerun_requested, rerun_note = maybe_trigger_idle_ci(client, state, run)
+        if rerun_requested:
+            state["last_action"] = "requested CI rerun after idle poll"
+        note += f" {rerun_note}"
     elif round_number < MIN_ROUNDS:
         client.rerun_workflow(run["id"])
         remember_rerun_request(state, run_attempt)
@@ -1186,7 +1260,7 @@ def main():
         follow_up_note = ""
         if reason and "No matching CI workflow run found" in reason:
             if PASSIVE_COMPLETION_MONITOR:
-                follow_up_note = " " + passive_polling_wait_note()
+                follow_up_note = " " + wait_note()
             else:
                 follow_up_note = " " + queue_follow_up_monitor_if_needed(
                     client,
@@ -1218,7 +1292,7 @@ def main():
     if latest_run is None:
         state["last_action"] = "waiting for latest PR head CI run"
         follow_up_note = (
-            passive_polling_wait_note()
+            wait_note()
             if PASSIVE_COMPLETION_MONITOR
             else queue_follow_up_monitor_if_needed(
                 client,
@@ -1291,7 +1365,7 @@ def main():
     if run.get("status") != "completed":
         state["last_action"] = "waiting for CI workflow completion"
         follow_up_note = (
-            passive_polling_wait_note()
+            wait_note()
             if PASSIVE_COMPLETION_MONITOR
             else queue_follow_up_monitor_if_needed(
                 client,
@@ -1316,7 +1390,19 @@ def main():
 
     if run_attempt in processed_run_attempts:
         if PASSIVE_COMPLETION_MONITOR:
-            state["last_action"] = "waiting for newer completed CI run"
+            rerun_requested, rerun_note = maybe_trigger_idle_ci(client, state, run)
+            if rerun_requested:
+                state["last_action"] = "requested CI rerun after idle poll"
+                note = (
+                    f"Run `{run['id']}` attempt `{attempt}` was already processed in this session."
+                    f"{cancelled_note} {rerun_note}"
+                )
+            else:
+                state["last_action"] = "waiting for newer completed CI run"
+                note = (
+                    f"Run `{run['id']}` attempt `{attempt}` was already processed in this session."
+                    f"{cancelled_note} {rerun_note if active_polling_mode_enabled() else wait_note()}"
+                )
             upsert_state_comment(
                 client,
                 TARGET_PR_NUMBER,
@@ -1324,10 +1410,7 @@ def main():
                 state,
                 run,
                 state_jobs,
-                (
-                    f"Run `{run['id']}` attempt `{attempt}` was already processed in this session."
-                    f"{cancelled_note} {passive_polling_wait_note()}"
-                ),
+                note,
             )
             return 0
         if int(state.get("completed_rounds", 0)) < MIN_ROUNDS:
