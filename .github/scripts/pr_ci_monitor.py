@@ -480,7 +480,8 @@ def monitoring_mode_summary_line():
     if active_polling_mode_enabled():
         return (
             "- Active polling mode: completed CI attempts are still recorded with per-job "
-            "snippets, and poll runs request a new CI attempt whenever this PR is idle."
+            "snippets, and poll runs keep the latest PR head covered by rerunning an idle "
+            "current-head CI attempt or bootstrapping one if that head has no CI run yet."
         )
     if PASSIVE_COMPLETION_MONITOR:
         return (
@@ -514,7 +515,9 @@ def passive_monitoring_note():
 def active_polling_note():
     return (
         "Active polling mode is enabled; completed CI runs still post per-job snippets, "
-        "and scheduled/manual polls request another CI attempt only when this PR is idle."
+        "and scheduled/manual polls keep the latest PR head covered by rerunning an idle "
+        "current-head CI attempt or bootstrapping one via workflow_dispatch when that head "
+        "has no CI run yet."
     )
 
 
@@ -528,7 +531,8 @@ def passive_polling_wait_note():
 def active_polling_wait_note():
     return (
         f"Active polling mode is enabled; the next scheduled check runs about every "
-        f"{ACTIVE_TRIGGER_POLL_INTERVAL_MINUTES} minute(s)."
+        f"{ACTIVE_TRIGGER_POLL_INTERVAL_MINUTES} minute(s) and will bootstrap the latest "
+        "PR head if it still has no CI run."
     )
 
 
@@ -556,6 +560,34 @@ def maybe_trigger_idle_ci(client, state, run):
         f"{retry_reason} Requested another full CI rerun because no CI workflow is "
         "currently running for this PR head."
     )
+
+
+def maybe_bootstrap_latest_head_ci(client, pr, state):
+    if not active_polling_mode_enabled():
+        return False, "Active polling mode is disabled.", None
+    if not current_event_supports_active_trigger():
+        return False, "This event only records results; active bootstrapping waits for the next poll.", None
+
+    dispatch_needed, dispatch_reason = should_dispatch_ci_recovery(state, pr)
+    if not dispatch_needed:
+        return False, f"{dispatch_reason} {active_polling_wait_note()}", None
+
+    fresh_run = dispatch_ci_workflow_for_recovery(client, pr, state)
+    bootstrap_note = (
+        f"{dispatch_reason} Requested a CI workflow_dispatch bootstrap for current PR head "
+        f"`{pr['head']['sha'][:7]}`."
+    )
+    if fresh_run:
+        return True, (
+            f"{bootstrap_note} Observed CI run `{fresh_run['id']}` attempt "
+            f"`{fresh_run.get('run_attempt', 1)}` with status "
+            f"`{fresh_run.get('status')}`."
+        ), fresh_run
+
+    return True, (
+        f"{bootstrap_note} No dispatched CI run appeared within "
+        f"{CI_DISPATCH_WAIT_TIMEOUT_SECONDS} second(s). {active_polling_wait_note()}"
+    ), None
 
 
 def upsert_state_comment(client, pr_number, comment, state, run, state_jobs, note):
@@ -1371,7 +1403,45 @@ def main():
             return 0
         follow_up_note = ""
         if reason and "No matching CI workflow run found" in reason:
-            if PASSIVE_COMPLETION_MONITOR:
+            if active_polling_mode_enabled():
+                bootstrapped, bootstrap_note, fresh_run = maybe_bootstrap_latest_head_ci(
+                    client,
+                    pr,
+                    state,
+                )
+                if bootstrapped:
+                    state["last_action"] = "dispatched CI workflow for current PR head"
+                    if fresh_run:
+                        fresh_attempt = int(fresh_run.get("run_attempt", 1))
+                        fresh_jobs = load_jobs_for_run_attempt(
+                            client,
+                            fresh_run["id"],
+                            fresh_attempt,
+                        )
+                        upsert_state_comment(
+                            client,
+                            TARGET_PR_NUMBER,
+                            state_comment,
+                            state,
+                            fresh_run,
+                            build_state_jobs(fresh_jobs, fresh_run),
+                            f"{reason} {bootstrap_note}",
+                        )
+                    else:
+                        upsert_state_comment(
+                            client,
+                            TARGET_PR_NUMBER,
+                            state_comment,
+                            state,
+                            None,
+                            [],
+                            f"{reason} {bootstrap_note}",
+                        )
+                    return 0
+                state["last_action"] = "waiting for latest PR head CI run"
+                follow_up_note = " " + bootstrap_note
+            elif PASSIVE_COMPLETION_MONITOR:
+                state["last_action"] = "waiting for latest PR head CI run"
                 follow_up_note = " " + wait_note()
             else:
                 follow_up_note = " " + queue_follow_up_monitor_if_needed(
@@ -1380,7 +1450,8 @@ def main():
                     f"no-run:{pr['head']['sha']}",
                     f"wait-for-ci-run:{pr['head']['sha']}",
                 )
-        state["last_action"] = "no-op"
+        if state.get("last_action") == "initialized":
+            state["last_action"] = "no-op"
         upsert_state_comment(
             client,
             TARGET_PR_NUMBER,
@@ -1410,16 +1481,59 @@ def main():
 
     if latest_run is None:
         state["last_action"] = "waiting for latest PR head CI run"
-        follow_up_note = (
-            wait_note()
-            if PASSIVE_COMPLETION_MONITOR
-            else queue_follow_up_monitor_if_needed(
+        if active_polling_mode_enabled():
+            bootstrapped, bootstrap_note, fresh_run = maybe_bootstrap_latest_head_ci(
                 client,
+                pr,
                 state,
-                f"latest-run-missing:{pr['head']['sha']}",
-                f"wait-for-latest-run:{pr['head']['sha']}",
             )
-        )
+            if bootstrapped:
+                state["last_action"] = "dispatched CI workflow for current PR head"
+                if fresh_run:
+                    fresh_attempt = int(fresh_run.get("run_attempt", 1))
+                    fresh_jobs = load_jobs_for_run_attempt(
+                        client,
+                        fresh_run["id"],
+                        fresh_attempt,
+                    )
+                    upsert_state_comment(
+                        client,
+                        TARGET_PR_NUMBER,
+                        state_comment,
+                        state,
+                        fresh_run,
+                        build_state_jobs(fresh_jobs, fresh_run),
+                        (
+                            f"No CI workflow run exists yet for the current PR head "
+                            f"`{pr['head']['sha'][:7]}`.{cancelled_note} {bootstrap_note}"
+                        ),
+                    )
+                else:
+                    upsert_state_comment(
+                        client,
+                        TARGET_PR_NUMBER,
+                        state_comment,
+                        state,
+                        None,
+                        [],
+                        (
+                            f"No CI workflow run exists yet for the current PR head "
+                            f"`{pr['head']['sha'][:7]}`.{cancelled_note} {bootstrap_note}"
+                        ),
+                    )
+                return 0
+            follow_up_note = bootstrap_note
+        else:
+            follow_up_note = (
+                wait_note()
+                if PASSIVE_COMPLETION_MONITOR
+                else queue_follow_up_monitor_if_needed(
+                    client,
+                    state,
+                    f"latest-run-missing:{pr['head']['sha']}",
+                    f"wait-for-latest-run:{pr['head']['sha']}",
+                )
+            )
         upsert_state_comment(
             client,
             TARGET_PR_NUMBER,

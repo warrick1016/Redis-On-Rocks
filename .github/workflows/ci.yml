@@ -1,10 +1,31 @@
 name: CI
+run-name: >-
+  ${{
+    github.event_name == 'workflow_dispatch'
+      && format('PR #{0} {1}', github.event.inputs.pr_number, github.event.inputs.checkout_sha)
+      || github.event.pull_request.title
+      || github.ref_name
+  }}
 
 on:
   push:
     branches: [ feature/ror-update-8.2.0 ]
   pull_request:
     branches: [ feature/ror-update-8.2.0, fix/loading ]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number for manually bootstrapped CI"
+        required: false
+        default: ""
+      checkout_ref:
+        description: "Branch or ref to check out"
+        required: false
+        default: ""
+      checkout_sha:
+        description: "Exact commit SHA to check out"
+        required: false
+        default: ""
 
 jobs:
   # ROR Unit Tests with SWAP mode
@@ -16,6 +37,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
       with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.checkout_sha || github.event.inputs.checkout_ref) || github.ref }}
           submodules: true
     - name: get rocksdb sha
       id: rocksdb-sha
@@ -46,6 +68,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
       with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.checkout_sha || github.event.inputs.checkout_ref) || github.ref }}
           submodules: true
     - name: install dependencies
       run: |
@@ -65,6 +88,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
       with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.checkout_sha || github.event.inputs.checkout_ref) || github.ref }}
           submodules: true
     - name: install dependencies
       run: |
@@ -84,6 +108,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
       with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.checkout_sha || github.event.inputs.checkout_ref) || github.ref }}
           submodules: true
     - name: get rocksdb sha
       id: rocksdb-sha
@@ -116,6 +141,7 @@ jobs:
     steps:
     - uses: actions/checkout@v4
       with:
+          ref: ${{ github.event_name == 'workflow_dispatch' && (github.event.inputs.checkout_sha || github.event.inputs.checkout_ref) || github.ref }}
           submodules: true
     - name: get rocksdb sha
       id: rocksdb-sha
