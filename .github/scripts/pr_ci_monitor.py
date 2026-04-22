@@ -56,6 +56,9 @@ ACTIVE_TRIGGER_IF_IDLE = os.environ.get("ACTIVE_TRIGGER_IF_IDLE") == "1"
 ACTIVE_TRIGGER_POLL_INTERVAL_MINUTES = int(
     os.environ.get("ACTIVE_TRIGGER_POLL_INTERVAL_MINUTES", "30")
 )
+RECENT_COMPLETED_BACKFILL_MINUTES = int(
+    os.environ.get("RECENT_COMPLETED_BACKFILL_MINUTES", "0")
+)
 ENABLE_CI_WORKFLOW_DISPATCH_RECOVERY = (
     os.environ.get("ENABLE_CI_WORKFLOW_DISPATCH_RECOVERY") == "1"
 )
@@ -285,6 +288,13 @@ class GitHubClient:
         query = urllib.parse.urlencode({"filter": filter_mode, "per_page": 100})
         data = self.get_json(
             f"/repos/{self.owner}/{self.repo}/actions/runs/{run_id}/jobs?{query}"
+        )
+        return sorted(data.get("jobs", []), key=job_sort_key)
+
+    def get_run_attempt_jobs(self, run_id, attempt_number, filter_mode="latest"):
+        query = urllib.parse.urlencode({"filter": filter_mode, "per_page": 100})
+        data = self.get_json(
+            f"/repos/{self.owner}/{self.repo}/actions/runs/{run_id}/attempts/{attempt_number}/jobs?{query}"
         )
         return sorted(data.get("jobs", []), key=job_sort_key)
 
@@ -666,6 +676,76 @@ def find_latest_ci_run_for_pr(client, pr):
     return runs[-1] if runs else None
 
 
+def load_jobs_for_run_attempt(client, run_id, attempt):
+    return client.get_run_attempt_jobs(run_id, attempt, filter_mode="latest")
+
+
+def backfill_sort_key(run):
+    return (
+        parse_github_timestamp(run.get("updated_at"))
+        or parse_github_timestamp(run.get("created_at"))
+        or datetime.min.replace(tzinfo=timezone.utc),
+        run.get("id", 0),
+    )
+
+
+def find_recent_completed_backfill_candidates(client, pr, state):
+    if RECENT_COMPLETED_BACKFILL_MINUTES <= 0:
+        return []
+
+    cutoff = datetime.now(timezone.utc) - timedelta(
+        minutes=RECENT_COMPLETED_BACKFILL_MINUTES
+    )
+    processed_run_attempts = set(state.get("processed_run_attempts", []))
+    candidates = []
+    for run in find_recent_ci_runs_for_pr(client, pr):
+        if run.get("status") != "completed":
+            continue
+        completed_at = parse_github_timestamp(run.get("updated_at"))
+        if not completed_at or completed_at < cutoff:
+            continue
+
+        attempt = int(run.get("run_attempt", 1))
+        if run_attempt_key(run["id"], attempt) in processed_run_attempts:
+            continue
+        candidates.append(run)
+
+    return sorted(candidates, key=backfill_sort_key)
+
+
+def backfill_recent_completed_runs(client, pr, state, state_comment, comments):
+    current_state_comment = state_comment
+    current_comments = comments
+    backfilled = 0
+
+    for run in find_recent_completed_backfill_candidates(client, pr, state):
+        attempt = int(run.get("run_attempt", 1))
+        jobs = load_jobs_for_run_attempt(client, run["id"], attempt)
+        processed = process_completed_runs_for_pr(
+            client,
+            run,
+            state,
+            current_state_comment,
+            current_comments,
+            attempt=attempt,
+            jobs=jobs,
+            action_label="backfilled recent completed CI run",
+            note_prefix=(
+                f"Backfilled an unrecorded completed CI run from the past "
+                f"{RECENT_COMPLETED_BACKFILL_MINUTES} minute(s)."
+            ),
+            allow_active_trigger=False,
+        )
+        if not processed:
+            continue
+
+        backfilled += 1
+        current_comments = client.list_pr_comments(TARGET_PR_NUMBER)
+        current_state_comment = find_state_comment(current_comments)
+
+    return backfilled, current_state_comment, current_comments
+
+
 def cancel_outdated_ci_runs(client, pr, latest_run):
     cancelled = []
     for run in find_recent_ci_runs_for_pr(client, pr):
@@ -692,6 +772,23 @@ def resolve_target_context(client, event, pr):
         if not workflow_run.get("id"):
             return None, None, "Ignored workflow_run event without a run id."
         run = client.get_workflow_run(workflow_run["id"])
+        for key in (
+            "status",
+            "conclusion",
+            "run_attempt",
+            "html_url",
+            "created_at",
+            "updated_at",
+            "pull_requests",
+            "head_sha",
+            "head_branch",
+            "display_title",
+            "event",
+            "name",
+            "run_number",
+        ):
+            if key in workflow_run and workflow_run.get(key) is not None:
+                run[key] = workflow_run.get(key)
         if not run_matches_target_pr(run, pr):
             return None, None, f"Ignored CI completion unrelated to PR #{TARGET_PR_NUMBER}."
         return run, None, None
@@ -1174,19 +1271,31 @@ def dispatch_ci_workflow_for_recovery(client, pr, state):
     return wait_for_dispatched_ci_run(client, TARGET_PR_NUMBER, previous_run_ids)
 
 
-def process_completed_runs_for_pr(client, run, state, state_comment, comments):
+def process_completed_runs_for_pr(
+    client,
+    run,
+    state,
+    state_comment,
+    comments,
+    attempt=None,
+    jobs=None,
+    action_label="recorded completed CI run",
+    note_prefix="",
+    allow_active_trigger=True,
+):
     if not PASSIVE_COMPLETION_MONITOR and int(state.get("completed_rounds", 0)) >= MIN_ROUNDS:
         return False
     if run.get("status") != "completed":
         return False
 
-    attempt = int(run.get("run_attempt", 1))
+    attempt = int(attempt if attempt is not None else run.get("run_attempt", 1))
     run_attempt = run_attempt_key(run["id"], attempt)
     processed_run_attempts = set(state.get("processed_run_attempts", []))
     if run_attempt in processed_run_attempts:
         return False
 
-    jobs = client.get_run_jobs(run["id"], filter_mode="latest")
+    if jobs is None:
+        jobs = load_jobs_for_run_attempt(client, run["id"], attempt)
     round_number = int(state.get("completed_rounds", 0)) + 1
     post_result_comment_if_needed(client, TARGET_PR_NUMBER, run, round_number, jobs, comments)
 
@@ -1203,13 +1312,16 @@ def process_completed_runs_for_pr(client, run, state, state_comment, comments):
         f"Processed CI run `{run['id']}` attempt `{attempt}` "
         f"as recorded item `{round_number}` in this session."
     )
+    if note_prefix:
+        note = f"{note_prefix} {note}"
     if PASSIVE_COMPLETION_MONITOR:
-        state["last_action"] = "recorded completed CI run"
+        state["last_action"] = action_label
         note += f" {active_polling_note() if active_polling_mode_enabled() else passive_monitoring_note()}"
-        rerun_requested, rerun_note = maybe_trigger_idle_ci(client, state, run)
-        if rerun_requested:
-            state["last_action"] = "requested CI rerun after idle poll"
-        note += f" {rerun_note}"
+        if allow_active_trigger:
+            rerun_requested, rerun_note = maybe_trigger_idle_ci(client, state, run)
+            if rerun_requested:
+                state["last_action"] = "requested CI rerun after idle poll"
+            note += f" {rerun_note}"
     elif round_number < MIN_ROUNDS:
         client.rerun_workflow(run["id"])
         remember_rerun_request(state, run_attempt)
@@ -1281,6 +1393,13 @@ def main():
         return 0
 
     latest_run = find_latest_ci_run_for_pr(client, pr)
+    backfilled_runs, state_comment, comments = backfill_recent_completed_runs(
+        client,
+        pr,
+        state,
+        state_comment,
+        comments,
+    )
     cancelled_runs = []
     if not PASSIVE_COMPLETION_MONITOR:
         cancelled_runs = cancel_outdated_ci_runs(client, pr, latest_run)
@@ -1328,9 +1447,9 @@ def main():
         )
         return 0
 
-    jobs = client.get_run_jobs(run["id"], filter_mode="latest")
-    state_jobs = build_state_jobs(jobs, run)
     attempt = int(run.get("run_attempt", 1))
+    jobs = load_jobs_for_run_attempt(client, run["id"], attempt)
+    state_jobs = build_state_jobs(jobs, run)
     run_attempt = run_attempt_key(run["id"], attempt)
     processed_run_attempts = set(state.get("processed_run_attempts", []))
 
@@ -1356,10 +1475,26 @@ def main():
                 comments,
             )
             comments = client.list_pr_comments(TARGET_PR_NUMBER)
-        process_completed_runs_for_pr(client, run, state, state_comment, comments)
+        process_completed_runs_for_pr(
+            client,
+            run,
+            state,
+            state_comment,
+            comments,
+            attempt=attempt,
+            jobs=jobs,
+        )
         return 0
 
-    if process_completed_runs_for_pr(client, run, state, state_comment, comments):
+    if process_completed_runs_for_pr(
+        client,
+        run,
+        state,
+        state_comment,
+        comments,
+        attempt=attempt,
+        jobs=jobs,
+    ):
         return 0
 
     if run.get("status") != "completed":
