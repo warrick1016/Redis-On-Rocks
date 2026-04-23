@@ -668,8 +668,22 @@ def workflow_dispatch_title(pr):
     return f"{workflow_dispatch_title_prefix()}{pr['head']['sha']}"
 
 
+def run_matches_target_workflow(run):
+    path = str(run.get("path", "") or "")
+    workflow_basename = os.path.basename(TARGET_WORKFLOW_FILE)
+    if path:
+        normalized_path = path.split("@", 1)[0]
+        if normalized_path == TARGET_WORKFLOW_FILE:
+            return True
+        if workflow_basename and normalized_path.endswith(f"/{workflow_basename}"):
+            return True
+        if workflow_basename and normalized_path == workflow_basename:
+            return True
+    return run.get("name") == WORKFLOW_NAME
+
+
 def run_matches_target_pr(run, pr):
-    if run.get("name") != WORKFLOW_NAME:
+    if not run_matches_target_workflow(run):
         return False
     if any(pr_info.get("number") == TARGET_PR_NUMBER for pr_info in run.get("pull_requests", [])):
         return True
@@ -799,8 +813,6 @@ def resolve_target_context(client, event, pr):
     event_name = os.environ["GITHUB_EVENT_NAME"]
     if event_name == "workflow_run":
         workflow_run = event.get("workflow_run", {})
-        if workflow_run.get("name") != WORKFLOW_NAME:
-            return None, None, "Ignored non-CI workflow_run event."
         if not workflow_run.get("id"):
             return None, None, "Ignored workflow_run event without a run id."
         run = client.get_workflow_run(workflow_run["id"])
@@ -818,23 +830,24 @@ def resolve_target_context(client, event, pr):
             "event",
             "name",
             "run_number",
+            "path",
         ):
             if key in workflow_run and workflow_run.get(key) is not None:
                 run[key] = workflow_run.get(key)
+        if not run_matches_target_workflow(run):
+            return None, None, "Ignored non-CI workflow_run event."
         if not run_matches_target_pr(run, pr):
             return None, None, f"Ignored CI completion unrelated to PR #{TARGET_PR_NUMBER}."
         return run, None, None
     if event_name == "workflow_job":
         workflow_job = event.get("workflow_job", {})
-        if workflow_job.get("workflow_name") and workflow_job.get("workflow_name") != WORKFLOW_NAME:
-            return None, None, "Ignored non-CI workflow_job event."
         if workflow_job.get("action") and workflow_job.get("action") != "completed":
             return None, None, "Ignored non-completed workflow_job event."
         if not workflow_job.get("id"):
             return None, None, "Ignored workflow_job event without a job id."
         job = client.get_workflow_job(workflow_job["id"])
         run = client.get_workflow_run(job["run_id"])
-        if run.get("name") != WORKFLOW_NAME:
+        if not run_matches_target_workflow(run):
             return None, None, "Ignored non-CI workflow_job event."
         if not run_matches_target_pr(run, pr):
             return None, None, f"Ignored completed job unrelated to PR #{TARGET_PR_NUMBER}."
