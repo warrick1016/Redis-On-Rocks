@@ -30,6 +30,11 @@ TARGET_JOB_PREFIXES = tuple(
     for value in os.environ.get("TARGET_JOB_PREFIXES", "swap,swap-asan").split(",")
     if value.strip()
 )
+RESULT_JOB_PREFIXES = tuple(
+    value.strip()
+    for value in os.environ.get("RESULT_JOB_PREFIXES", "").split(",")
+    if value.strip()
+)
 RESULT_POLICY = os.environ.get("RESULT_POLICY", "match_only")
 RESULT_COMMENT_MODE = os.environ.get("RESULT_COMMENT_MODE", "attempt")
 SNIPPET_LINE_COUNT = os.environ.get("SNIPPET_LINE_COUNT", "200")
@@ -161,6 +166,12 @@ def is_failed_job(job):
     return job.get("conclusion") not in NON_FAILURE_CONCLUSIONS
 
 
+def job_matches_result_prefixes(job):
+    if not RESULT_JOB_PREFIXES:
+        return True
+    return job_name_key(job.get("name", "")) in RESULT_JOB_PREFIXES
+
+
 def select_result_jobs(jobs):
     if JOB_SELECTION_MODE == "prefix":
         return [
@@ -169,7 +180,11 @@ def select_result_jobs(jobs):
             if job is not None and job.get("status") == "completed"
         ]
     if JOB_SELECTION_MODE == "failed":
-        return [job for job in jobs if is_failed_job(job)]
+        return [
+            job
+            for job in jobs
+            if is_failed_job(job) and job_matches_result_prefixes(job)
+        ]
     raise RuntimeError(f"Unsupported JOB_SELECTION_MODE `{JOB_SELECTION_MODE}`.")
 
 
@@ -177,6 +192,11 @@ def build_state_jobs(jobs, run):
     if JOB_SELECTION_MODE == "prefix":
         return [{"label": prefix, "job": find_job_by_prefix(jobs, prefix)} for prefix in TARGET_JOB_PREFIXES]
     if JOB_SELECTION_MODE == "failed":
+        if RESULT_JOB_PREFIXES:
+            return [
+                {"label": prefix, "job": find_job_by_prefix(jobs, prefix)}
+                for prefix in RESULT_JOB_PREFIXES
+            ]
         selected = [job for job in jobs if is_failed_job(job)] if run and run.get("status") == "completed" else jobs
         if not selected:
             return [{"label": "failed jobs", "job": None, "message": "none"}]

@@ -65,6 +65,7 @@ jobs:
           TARGET_WORKFLOW_NAME: CI
           TARGET_PHRASE: "couldn't open socket: connection refused"
           JOB_SELECTION_MODE: "failed"
+          RESULT_JOB_PREFIXES: "swap,mem"
           RESULT_POLICY: "always"
           RESULT_COMMENT_MODE: "job"
           SNIPPET_FALLBACK: "tail"
