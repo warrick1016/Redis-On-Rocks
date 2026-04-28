@@ -500,8 +500,8 @@ def monitoring_mode_summary_line():
     if active_polling_mode_enabled():
         return (
             "- Active polling mode: completed CI attempts are still recorded with per-job "
-            "snippets, and poll runs keep the latest PR head covered by rerunning an idle "
-            "current-head CI attempt or bootstrapping one if that head has no CI run yet."
+            "snippets, and poll runs keep the latest PR head covered by dispatching a "
+            "fresh current-head CI run whenever that head is idle or has no CI run yet."
         )
     if PASSIVE_COMPLETION_MONITOR:
         return (
@@ -535,8 +535,8 @@ def passive_monitoring_note():
 def active_polling_note():
     return (
         "Active polling mode is enabled; completed CI runs still post per-job snippets, "
-        "and scheduled/manual polls keep the latest PR head covered by rerunning an idle "
-        "current-head CI attempt or bootstrapping one via workflow_dispatch when that head "
+        "and scheduled/manual polls keep the latest PR head covered by dispatching a "
+        "fresh current-head CI run via workflow_dispatch whenever that head is idle or "
         "has no CI run yet."
     )
 
@@ -551,8 +551,8 @@ def passive_polling_wait_note():
 def active_polling_wait_note():
     return (
         f"Active polling mode is enabled; the next scheduled check runs about every "
-        f"{ACTIVE_TRIGGER_POLL_INTERVAL_MINUTES} minute(s) and will bootstrap the latest "
-        "PR head if it still has no CI run."
+        f"{ACTIVE_TRIGGER_POLL_INTERVAL_MINUTES} minute(s) and will dispatch a fresh CI "
+        "run for the latest PR head if that head still has no active CI run."
     )
 
 
@@ -562,24 +562,35 @@ def wait_note():
     return passive_polling_wait_note()
 
 
-def maybe_trigger_idle_ci(client, state, run):
+def maybe_trigger_idle_ci(client, pr, state, run):
     if not active_polling_mode_enabled():
-        return False, "Active polling mode is disabled."
+        return False, "Active polling mode is disabled.", None
     if not current_event_supports_active_trigger():
-        return False, "This event only records results; active triggering waits for the next poll."
+        return False, "This event only records results; active triggering waits for the next poll.", None
 
-    attempt = int(run.get("run_attempt", 1))
-    run_attempt = run_attempt_key(run["id"], attempt)
-    retry_needed, retry_reason = should_retry_processed_attempt(state, run_attempt)
-    if not retry_needed:
-        return False, f"{retry_reason} {active_polling_wait_note()}"
-
-    client.rerun_workflow(run["id"])
-    remember_rerun_request(state, run_attempt)
-    return True, (
-        f"{retry_reason} Requested another full CI rerun because no CI workflow is "
-        "currently running for this PR head."
+    dispatch_needed, dispatch_reason = should_dispatch_ci_for_pr_head(
+        state,
+        pr,
+        "fresh CI workflow_dispatch",
     )
+    if not dispatch_needed:
+        return False, f"{dispatch_reason} {active_polling_wait_note()}", None
+
+    fresh_run = dispatch_ci_workflow_for_recovery(client, pr, state)
+    dispatch_note = (
+        f"{dispatch_reason} Requested a fresh CI workflow_dispatch for current PR head "
+        f"`{pr['head']['sha'][:7]}` because no CI workflow is currently running for this PR head."
+    )
+    if fresh_run:
+        return True, (
+            f"{dispatch_note} Observed CI run `{fresh_run['id']}` attempt "
+            f"`{fresh_run.get('run_attempt', 1)}` with status "
+            f"`{fresh_run.get('status')}`."
+        ), fresh_run
+    return True, (
+        f"{dispatch_note} No dispatched CI run appeared within "
+        f"{CI_DISPATCH_WAIT_TIMEOUT_SECONDS} second(s). {active_polling_wait_note()}"
+    ), None
 
 
 def maybe_bootstrap_latest_head_ci(client, pr, state):
@@ -588,7 +599,11 @@ def maybe_bootstrap_latest_head_ci(client, pr, state):
     if not current_event_supports_active_trigger():
         return False, "This event only records results; active bootstrapping waits for the next poll.", None
 
-    dispatch_needed, dispatch_reason = should_dispatch_ci_recovery(state, pr)
+    dispatch_needed, dispatch_reason = should_dispatch_ci_for_pr_head(
+        state,
+        pr,
+        "CI workflow_dispatch bootstrap",
+    )
     if not dispatch_needed:
         return False, f"{dispatch_reason} {active_polling_wait_note()}", None
 
@@ -789,6 +804,7 @@ def backfill_recent_completed_runs(client, pr, state, state_comment, comments):
         jobs = load_jobs_for_run_attempt(client, run["id"], attempt)
         processed = process_completed_runs_for_pr(
             client,
+            pr,
             run,
             state,
             current_state_comment,
@@ -1255,31 +1271,35 @@ def should_reopen_processed_attempt(state, run, run_attempt):
     )
 
 
-def should_dispatch_ci_recovery(state, pr):
+def should_dispatch_ci_for_pr_head(state, pr, dispatch_label):
     if not ENABLE_CI_WORKFLOW_DISPATCH_RECOVERY:
-        return False, "CI workflow_dispatch recovery is disabled."
+        return False, f"{dispatch_label} is disabled."
     if not CI_WORKFLOW_FILE or not CI_WORKFLOW_REF:
-        return False, "CI workflow_dispatch recovery is not fully configured."
+        return False, f"{dispatch_label} is not fully configured."
 
     head_sha = pr["head"]["sha"]
     if state.get("last_ci_dispatch_head_sha") != head_sha:
-        return True, "No CI workflow_dispatch recovery has been recorded yet for this PR head."
+        return True, f"No {dispatch_label} has been recorded yet for this PR head."
 
     last_dispatched_at = parse_github_timestamp(state.get("last_ci_dispatch_at"))
     if not last_dispatched_at:
-        return True, "The previous CI workflow_dispatch timestamp is missing, so dispatching again."
+        return True, f"The previous {dispatch_label} timestamp is missing, so dispatching again."
 
     retry_after = timedelta(seconds=CI_DISPATCH_RETRY_AFTER_SECONDS)
     if datetime.now(timezone.utc) - last_dispatched_at >= retry_after:
         return True, (
-            f"The previous CI workflow_dispatch recovery for this PR head is older than "
+            f"The previous {dispatch_label} for this PR head is older than "
             f"{CI_DISPATCH_RETRY_AFTER_SECONDS} second(s)."
         )
 
     return False, (
-        f"A CI workflow_dispatch recovery for this PR head was already requested at "
+        f"A {dispatch_label} for this PR head was already requested at "
         f"`{state.get('last_ci_dispatch_at')}`."
     )
+
+
+def should_dispatch_ci_recovery(state, pr):
+    return should_dispatch_ci_for_pr_head(state, pr, "CI workflow_dispatch recovery")
 
 
 def wait_for_fresh_pr_ci_run(client, pr_number, previous_run_id, expected_head_sha):
@@ -1338,6 +1358,7 @@ def dispatch_ci_workflow_for_recovery(client, pr, state):
 
 def process_completed_runs_for_pr(
     client,
+    pr,
     run,
     state,
     state_comment,
@@ -1377,16 +1398,22 @@ def process_completed_runs_for_pr(
         f"Processed CI run `{run['id']}` attempt `{attempt}` "
         f"as recorded item `{round_number}` in this session."
     )
+    comment_run = run
+    comment_jobs = jobs
     if note_prefix:
         note = f"{note_prefix} {note}"
     if PASSIVE_COMPLETION_MONITOR:
         state["last_action"] = action_label
         note += f" {active_polling_note() if active_polling_mode_enabled() else passive_monitoring_note()}"
         if allow_active_trigger:
-            rerun_requested, rerun_note = maybe_trigger_idle_ci(client, state, run)
-            if rerun_requested:
-                state["last_action"] = "requested CI rerun after idle poll"
-            note += f" {rerun_note}"
+            dispatch_requested, dispatch_note, fresh_run = maybe_trigger_idle_ci(client, pr, state, run)
+            if dispatch_requested:
+                state["last_action"] = "dispatched fresh CI run after idle poll"
+                if fresh_run:
+                    fresh_attempt = int(fresh_run.get("run_attempt", 1))
+                    comment_run = fresh_run
+                    comment_jobs = load_jobs_for_run_attempt(client, fresh_run["id"], fresh_attempt)
+            note += f" {dispatch_note}"
     elif round_number < MIN_ROUNDS:
         client.rerun_workflow(run["id"])
         remember_rerun_request(state, run_attempt)
@@ -1407,8 +1434,8 @@ def process_completed_runs_for_pr(
         TARGET_PR_NUMBER,
         state_comment,
         state,
-        run,
-        build_state_jobs(jobs, run),
+        comment_run,
+        build_state_jobs(comment_jobs, comment_run),
         note,
     )
     return True
@@ -1624,6 +1651,7 @@ def main():
             comments = client.list_pr_comments(TARGET_PR_NUMBER)
         process_completed_runs_for_pr(
             client,
+            pr,
             run,
             state,
             state_comment,
@@ -1635,6 +1663,7 @@ def main():
 
     if process_completed_runs_for_pr(
         client,
+        pr,
         run,
         state,
         state_comment,
@@ -1672,26 +1701,33 @@ def main():
 
     if run_attempt in processed_run_attempts:
         if PASSIVE_COMPLETION_MONITOR:
-            rerun_requested, rerun_note = maybe_trigger_idle_ci(client, state, run)
-            if rerun_requested:
-                state["last_action"] = "requested CI rerun after idle poll"
+            dispatch_requested, dispatch_note, fresh_run = maybe_trigger_idle_ci(client, pr, state, run)
+            comment_run = run
+            comment_state_jobs = state_jobs
+            if dispatch_requested:
+                state["last_action"] = "dispatched fresh CI run after idle poll"
+                if fresh_run:
+                    fresh_attempt = int(fresh_run.get("run_attempt", 1))
+                    fresh_jobs = load_jobs_for_run_attempt(client, fresh_run["id"], fresh_attempt)
+                    comment_run = fresh_run
+                    comment_state_jobs = build_state_jobs(fresh_jobs, fresh_run)
                 note = (
                     f"Run `{run['id']}` attempt `{attempt}` was already processed in this session."
-                    f"{cancelled_note} {rerun_note}"
+                    f"{cancelled_note} {dispatch_note}"
                 )
             else:
                 state["last_action"] = "waiting for newer completed CI run"
                 note = (
                     f"Run `{run['id']}` attempt `{attempt}` was already processed in this session."
-                    f"{cancelled_note} {rerun_note if active_polling_mode_enabled() else wait_note()}"
+                    f"{cancelled_note} {dispatch_note if active_polling_mode_enabled() else wait_note()}"
                 )
             upsert_state_comment(
                 client,
                 TARGET_PR_NUMBER,
                 state_comment,
                 state,
-                run,
-                state_jobs,
+                comment_run,
+                comment_state_jobs,
                 note,
             )
             return 0
