@@ -135,6 +135,23 @@ def run_attempt_sort_key(value):
     return (run_id, attempt)
 
 
+def job_run_attempt(job):
+    value = job.get("run_attempt")
+    if value is None:
+        return None
+    try:
+        return int(value)
+    except (TypeError, ValueError):
+        return None
+
+
+def job_belongs_to_attempt(job, attempt):
+    job_attempt = job_run_attempt(job)
+    if job_attempt is None:
+        return True
+    return job_attempt == int(attempt)
+
+
 def result_marker(run_id, attempt, job_id=None):
     marker = f"<!-- pr-ci-monitor-result session={SESSION_ID} run={run_id} attempt={attempt}"
     if job_id is not None:
@@ -758,7 +775,15 @@ def find_latest_ci_run_for_pr(client, pr):
 
 
 def load_jobs_for_run_attempt(client, run_id, attempt):
-    return client.get_run_attempt_jobs(run_id, attempt, filter_mode="latest")
+    jobs = client.get_run_attempt_jobs(run_id, attempt, filter_mode="latest")
+    filtered_jobs = [job for job in jobs if job_belongs_to_attempt(job, attempt)]
+    stale_job_count = len(jobs) - len(filtered_jobs)
+    if stale_job_count:
+        log(
+            f"Filtered {stale_job_count} carried-over job(s) from run {run_id} "
+            f"attempt {attempt}."
+        )
+    return filtered_jobs
 
 
 def backfill_sort_key(run):
