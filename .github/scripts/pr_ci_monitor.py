@@ -145,11 +145,54 @@ def job_run_attempt(job):
         return None
 
 
-def job_belongs_to_attempt(job, attempt):
+def run_attempt_started_at(run):
+    if not run:
+        return None
+    return parse_github_timestamp(run.get("run_started_at"))
+
+
+def job_started_at(job):
+    timestamps = []
+    timestamp = parse_github_timestamp(job.get("started_at"))
+    if timestamp:
+        timestamps.append(timestamp)
+    for step in job.get("steps") or []:
+        timestamp = parse_github_timestamp(step.get("started_at"))
+        if timestamp:
+            timestamps.append(timestamp)
+    return min(timestamps) if timestamps else None
+
+
+def job_completed_at(job):
+    timestamps = []
+    timestamp = parse_github_timestamp(job.get("completed_at"))
+    if timestamp:
+        timestamps.append(timestamp)
+    for step in job.get("steps") or []:
+        timestamp = parse_github_timestamp(step.get("completed_at"))
+        if timestamp:
+            timestamps.append(timestamp)
+    return max(timestamps) if timestamps else None
+
+
+def job_belongs_to_attempt(job, attempt, run=None):
     job_attempt = job_run_attempt(job)
-    if job_attempt is None:
+    if job_attempt is not None and job_attempt != int(attempt):
+        return False
+
+    attempt_started_at = run_attempt_started_at(run)
+    if attempt_started_at is None:
         return True
-    return job_attempt == int(attempt)
+
+    started_at = job_started_at(job)
+    if started_at is not None:
+        return started_at >= attempt_started_at
+
+    completed_at = job_completed_at(job)
+    if completed_at is not None:
+        return completed_at >= attempt_started_at
+
+    return True
 
 
 def result_marker(run_id, attempt, job_id=None):
@@ -774,9 +817,13 @@ def find_latest_ci_run_for_pr(client, pr):
     return runs[-1] if runs else None
 
 
-def load_jobs_for_run_attempt(client, run_id, attempt):
+def load_jobs_for_run_attempt(client, run, attempt=None):
+    run_id = run["id"]
+    attempt = int(attempt if attempt is not None else run.get("run_attempt", 1))
+    if run_attempt_started_at(run) is None:
+        run = client.get_workflow_run(run_id)
     jobs = client.get_run_attempt_jobs(run_id, attempt, filter_mode="latest")
-    filtered_jobs = [job for job in jobs if job_belongs_to_attempt(job, attempt)]
+    filtered_jobs = [job for job in jobs if job_belongs_to_attempt(job, attempt, run)]
     stale_job_count = len(jobs) - len(filtered_jobs)
     if stale_job_count:
         log(
@@ -826,7 +873,7 @@ def backfill_recent_completed_runs(client, pr, state, state_comment, comments):
 
     for run in find_recent_completed_backfill_candidates(client, pr, state):
         attempt = int(run.get("run_attempt", 1))
-        jobs = load_jobs_for_run_attempt(client, run["id"], attempt)
+        jobs = load_jobs_for_run_attempt(client, run, attempt)
         processed = process_completed_runs_for_pr(
             client,
             pr,
@@ -1406,7 +1453,7 @@ def process_completed_runs_for_pr(
         return False
 
     if jobs is None:
-        jobs = load_jobs_for_run_attempt(client, run["id"], attempt)
+        jobs = load_jobs_for_run_attempt(client, run, attempt)
     round_number = int(state.get("completed_rounds", 0)) + 1
     post_result_comment_if_needed(client, TARGET_PR_NUMBER, run, round_number, jobs, comments)
 
@@ -1437,7 +1484,7 @@ def process_completed_runs_for_pr(
                 if fresh_run:
                     fresh_attempt = int(fresh_run.get("run_attempt", 1))
                     comment_run = fresh_run
-                    comment_jobs = load_jobs_for_run_attempt(client, fresh_run["id"], fresh_attempt)
+                    comment_jobs = load_jobs_for_run_attempt(client, fresh_run, fresh_attempt)
             note += f" {dispatch_note}"
     elif round_number < MIN_ROUNDS:
         client.rerun_workflow(run["id"])
@@ -1498,11 +1545,7 @@ def main():
                     state["last_action"] = "dispatched CI workflow for current PR head"
                     if fresh_run:
                         fresh_attempt = int(fresh_run.get("run_attempt", 1))
-                        fresh_jobs = load_jobs_for_run_attempt(
-                            client,
-                            fresh_run["id"],
-                            fresh_attempt,
-                        )
+                        fresh_jobs = load_jobs_for_run_attempt(client, fresh_run, fresh_attempt)
                         upsert_state_comment(
                             client,
                             TARGET_PR_NUMBER,
@@ -1576,11 +1619,7 @@ def main():
                 state["last_action"] = "dispatched CI workflow for current PR head"
                 if fresh_run:
                     fresh_attempt = int(fresh_run.get("run_attempt", 1))
-                    fresh_jobs = load_jobs_for_run_attempt(
-                        client,
-                        fresh_run["id"],
-                        fresh_attempt,
-                    )
+                    fresh_jobs = load_jobs_for_run_attempt(client, fresh_run, fresh_attempt)
                     upsert_state_comment(
                         client,
                         TARGET_PR_NUMBER,
@@ -1647,7 +1686,7 @@ def main():
         return 0
 
     attempt = int(run.get("run_attempt", 1))
-    jobs = load_jobs_for_run_attempt(client, run["id"], attempt)
+    jobs = load_jobs_for_run_attempt(client, run, attempt)
     state_jobs = build_state_jobs(jobs, run)
     run_attempt = run_attempt_key(run["id"], attempt)
     processed_run_attempts = set(state.get("processed_run_attempts", []))
@@ -1733,7 +1772,7 @@ def main():
                 state["last_action"] = "dispatched fresh CI run after idle poll"
                 if fresh_run:
                     fresh_attempt = int(fresh_run.get("run_attempt", 1))
-                    fresh_jobs = load_jobs_for_run_attempt(client, fresh_run["id"], fresh_attempt)
+                    fresh_jobs = load_jobs_for_run_attempt(client, fresh_run, fresh_attempt)
                     comment_run = fresh_run
                     comment_state_jobs = build_state_jobs(fresh_jobs, fresh_run)
                 note = (
