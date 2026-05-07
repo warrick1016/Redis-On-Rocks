@@ -72,7 +72,7 @@ jobs:
           MATCH_LINE_POLICY: "exclude"
           MATCH_PRECEDING_LINE_COUNT: "200"
           TAIL_SNIPPET_LINE_COUNT: "30"
-          ENABLE_SELF_DISPATCH_BACKSTOP: "0"
+          ENABLE_SELF_DISPATCH_BACKSTOP: "1"
           PASSIVE_COMPLETION_MONITOR: "1"
           PASSIVE_POLL_INTERVAL_MINUTES: "30"
           ACTIVE_TRIGGER_IF_IDLE: "1"
@@ -83,5 +83,6 @@ jobs:
           FOLLOW_UP_POLL_SECONDS: "300"
           MONITOR_WORKFLOW_FILE: "pr15-ci-monitor.yml"
           MONITOR_WORKFLOW_REF: "fix/loading"
+          MONITOR_DISPATCH_SOURCE: ${{ github.event.inputs.source || '' }}
         run: |
           python3 .github/scripts/pr_ci_monitor.py

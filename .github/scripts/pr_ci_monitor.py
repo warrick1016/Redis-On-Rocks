@@ -53,6 +53,7 @@ MONITOR_WORKFLOW_FILE = os.environ.get("MONITOR_WORKFLOW_FILE", "")
 MONITOR_WORKFLOW_REF = os.environ.get(
     "MONITOR_WORKFLOW_REF", os.environ.get("GITHUB_REF_NAME", "")
 )
+MONITOR_DISPATCH_SOURCE = os.environ.get("MONITOR_DISPATCH_SOURCE", "")
 PASSIVE_COMPLETION_MONITOR = os.environ.get("PASSIVE_COMPLETION_MONITOR") == "1"
 PASSIVE_POLL_INTERVAL_MINUTES = int(
     os.environ.get("PASSIVE_POLL_INTERVAL_MINUTES", "20")
@@ -552,8 +553,20 @@ def active_polling_mode_enabled():
     return PASSIVE_COMPLETION_MONITOR and ACTIVE_TRIGGER_IF_IDLE
 
 
+def current_event_is_self_backstop():
+    return (
+        os.environ["GITHUB_EVENT_NAME"] == "workflow_dispatch"
+        and MONITOR_DISPATCH_SOURCE == "self-backstop"
+    )
+
+
 def current_event_supports_active_trigger():
-    return os.environ["GITHUB_EVENT_NAME"] in ("push", "schedule", "workflow_dispatch")
+    event_name = os.environ["GITHUB_EVENT_NAME"]
+    if event_name in ("push", "schedule"):
+        return True
+    if event_name != "workflow_dispatch":
+        return False
+    return not current_event_is_self_backstop()
 
 
 def monitoring_mode_summary_line():
@@ -622,6 +635,17 @@ def wait_note():
     return passive_polling_wait_note()
 
 
+def queue_ci_completion_follow_up_if_needed(client, state, pr, run=None):
+    if run is None:
+        target = f"ci-completion:head:{pr['head']['sha']}"
+        reason = f"wait-for-ci-run:{pr['head']['sha']}"
+    else:
+        attempt = int(run.get("run_attempt", 1))
+        target = f"ci-completion:{run_attempt_key(run['id'], attempt)}"
+        reason = f"wait-for-ci-completion:{run['id']}:{attempt}"
+    return queue_follow_up_monitor_if_needed(client, state, target, reason)
+
+
 def maybe_trigger_idle_ci(client, pr, state, run):
     if not active_polling_mode_enabled():
         return False, "Active polling mode is disabled.", None
@@ -641,15 +665,16 @@ def maybe_trigger_idle_ci(client, pr, state, run):
         f"{dispatch_reason} Requested a fresh CI workflow_dispatch for current PR head "
         f"`{pr['head']['sha'][:7]}` because no CI workflow is currently running for this PR head."
     )
+    follow_up_note = queue_ci_completion_follow_up_if_needed(client, state, pr, fresh_run)
     if fresh_run:
         return True, (
             f"{dispatch_note} Observed CI run `{fresh_run['id']}` attempt "
             f"`{fresh_run.get('run_attempt', 1)}` with status "
-            f"`{fresh_run.get('status')}`."
+            f"`{fresh_run.get('status')}`. {follow_up_note}"
         ), fresh_run
     return True, (
         f"{dispatch_note} No dispatched CI run appeared within "
-        f"{CI_DISPATCH_WAIT_TIMEOUT_SECONDS} second(s). {active_polling_wait_note()}"
+        f"{CI_DISPATCH_WAIT_TIMEOUT_SECONDS} second(s). {follow_up_note}"
     ), None
 
 
@@ -672,16 +697,17 @@ def maybe_bootstrap_latest_head_ci(client, pr, state):
         f"{dispatch_reason} Requested a CI workflow_dispatch bootstrap for current PR head "
         f"`{pr['head']['sha'][:7]}`."
     )
+    follow_up_note = queue_ci_completion_follow_up_if_needed(client, state, pr, fresh_run)
     if fresh_run:
         return True, (
             f"{bootstrap_note} Observed CI run `{fresh_run['id']}` attempt "
             f"`{fresh_run.get('run_attempt', 1)}` with status "
-            f"`{fresh_run.get('status')}`."
+            f"`{fresh_run.get('status')}`. {follow_up_note}"
         ), fresh_run
 
     return True, (
         f"{bootstrap_note} No dispatched CI run appeared within "
-        f"{CI_DISPATCH_WAIT_TIMEOUT_SECONDS} second(s). {active_polling_wait_note()}"
+        f"{CI_DISPATCH_WAIT_TIMEOUT_SECONDS} second(s). {follow_up_note}"
     ), None
 
 
@@ -1740,7 +1766,9 @@ def main():
     if run.get("status") != "completed":
         state["last_action"] = "waiting for CI workflow completion"
         follow_up_note = (
-            wait_note()
+            queue_ci_completion_follow_up_if_needed(client, state, pr, run)
+            if PASSIVE_COMPLETION_MONITOR and current_event_is_self_backstop()
+            else wait_note()
             if PASSIVE_COMPLETION_MONITOR
             else queue_follow_up_monitor_if_needed(
                 client,
