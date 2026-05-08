@@ -7,7 +7,7 @@ on:
       - ".github/scripts/pr_ci_monitor.py"
       - ".github/workflows/pr15-ci-monitor.yml"
   schedule:
-    - cron: "*/30 * * * *"
+    - cron: "*/15 * * * *"
   workflow_run:
     workflows: ["CI"]
     types: [completed]
@@ -61,7 +61,7 @@ jobs:
           TARGET_PR_NUMBER: ${{ github.event.inputs.pr_number || '15' }}
           MIN_ROUNDS: "50"
           MONITOR_SESSION_ID: "20260416-pr15-ci-r50-v1"
-          MONITOR_TRIGGER_DESCRIPTION: "triggered every 30 minutes via schedule, on CI completion via workflow_run, plus monitor-file push and manual workflow_dispatch"
+          MONITOR_TRIGGER_DESCRIPTION: "triggered every 15 minutes via schedule, on CI completion via workflow_run, plus monitor-file push and manual workflow_dispatch"
           TARGET_WORKFLOW_NAME: CI
           TARGET_PHRASE: "couldn't open socket: connection refused"
           JOB_SELECTION_MODE: "failed"
@@ -74,9 +74,9 @@ jobs:
           TAIL_SNIPPET_LINE_COUNT: "30"
           ENABLE_SELF_DISPATCH_BACKSTOP: "1"
           PASSIVE_COMPLETION_MONITOR: "1"
-          PASSIVE_POLL_INTERVAL_MINUTES: "30"
+          PASSIVE_POLL_INTERVAL_MINUTES: "15"
           ACTIVE_TRIGGER_IF_IDLE: "1"
-          ACTIVE_TRIGGER_POLL_INTERVAL_MINUTES: "30"
+          ACTIVE_TRIGGER_POLL_INTERVAL_MINUTES: "15"
           RECENT_COMPLETED_BACKFILL_MINUTES: "60"
           ENABLE_CI_WORKFLOW_DISPATCH_RECOVERY: "1"
           CI_DISPATCH_RETRY_AFTER_SECONDS: "1800"
