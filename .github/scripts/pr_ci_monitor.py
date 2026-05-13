@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 
+import base64
 import json
 import os
 import re
@@ -33,6 +34,14 @@ TARGET_JOB_PREFIXES = tuple(
 RESULT_JOB_PREFIXES = tuple(
     value.strip()
     for value in os.environ.get("RESULT_JOB_PREFIXES", "").split(",")
+    if value.strip()
+)
+COREDUMP_REPORT_PHRASE = os.environ.get(
+    "COREDUMP_REPORT_PHRASE", "Please report the crash by opening an issue on github"
+)
+COREDUMP_REPORT_JOB_PREFIXES = tuple(
+    value.strip()
+    for value in os.environ.get("COREDUMP_REPORT_JOB_PREFIXES", "swap-asan").split(",")
     if value.strip()
 )
 RESULT_POLICY = os.environ.get("RESULT_POLICY", "match_only")
@@ -84,6 +93,7 @@ PR_REOPEN_RETRY_AFTER_SECONDS = int(os.environ.get("PR_REOPEN_RETRY_AFTER_SECOND
 PR_REOPEN_WAIT_TIMEOUT_SECONDS = int(os.environ.get("PR_REOPEN_WAIT_TIMEOUT_SECONDS", "120"))
 PR_REOPEN_WAIT_POLL_SECONDS = int(os.environ.get("PR_REOPEN_WAIT_POLL_SECONDS", "5"))
 NON_FAILURE_CONCLUSIONS = {"success", "skipped", "neutral"}
+COREDUMP_SOURCE_LOCATION_RE = re.compile(r'\(file "([^"]+)" line (\d+)\)')
 
 
 def parse_github_timestamp(value):
@@ -233,6 +243,12 @@ def job_matches_result_prefixes(job):
     return job_name_key(job.get("name", "")) in RESULT_JOB_PREFIXES
 
 
+def job_matches_coredump_report_prefixes(job):
+    if not COREDUMP_REPORT_JOB_PREFIXES:
+        return False
+    return job_name_key(job.get("name", "")) in COREDUMP_REPORT_JOB_PREFIXES
+
+
 def select_result_jobs(jobs):
     if JOB_SELECTION_MODE == "prefix":
         return [
@@ -247,6 +263,29 @@ def select_result_jobs(jobs):
             if is_failed_job(job) and job_matches_result_prefixes(job)
         ]
     raise RuntimeError(f"Unsupported JOB_SELECTION_MODE `{JOB_SELECTION_MODE}`.")
+
+
+def select_result_job_requests(jobs):
+    requests = []
+    seen_job_ids = set()
+
+    for job in select_result_jobs(jobs):
+        job_id = job.get("id")
+        if job_id in seen_job_ids:
+            continue
+        requests.append({"job": job, "require_coredump_marker": False})
+        seen_job_ids.add(job_id)
+
+    for job in jobs:
+        if not is_failed_job(job) or not job_matches_coredump_report_prefixes(job):
+            continue
+        job_id = job.get("id")
+        if job_id in seen_job_ids:
+            continue
+        requests.append({"job": job, "require_coredump_marker": True})
+        seen_job_ids.add(job_id)
+
+    return requests
 
 
 def build_state_jobs(jobs, run):
@@ -267,6 +306,68 @@ def build_state_jobs(jobs, run):
 
 def sanitize_block(text):
     return text.replace("```", "``\\`")
+
+
+def run_checked_out_sha(run):
+    if run.get("event") == "workflow_dispatch":
+        title = run.get("display_title", "")
+        prefix = workflow_dispatch_title_prefix()
+        if title.startswith(prefix):
+            candidate = title[len(prefix) :].strip()
+            if re.fullmatch(r"[0-9a-f]{7,40}", candidate):
+                return candidate
+    if run.get("head_sha"):
+        return run.get("head_sha")
+    pull_requests = run.get("pull_requests") or []
+    if pull_requests:
+        return (pull_requests[0].get("head") or {}).get("sha")
+    return None
+
+
+def extract_coredump_source_location(test_lines):
+    matches = []
+    for index, line in enumerate(test_lines):
+        match = COREDUMP_SOURCE_LOCATION_RE.search(line)
+        if not match:
+            continue
+        matches.append(
+            {
+                "path": match.group(1),
+                "line_number": int(match.group(2)),
+                "log_index": index,
+            }
+        )
+    if not matches:
+        return None
+    preferred = [match for match in matches if not match["path"].startswith("tests/helpers/")]
+    return preferred[0] if preferred else matches[0]
+
+
+def fetch_coredump_source_line(client, run, location):
+    checkout_sha = run_checked_out_sha(run)
+    if not checkout_sha:
+        return None
+    try:
+        text = client.get_file_text(location["path"], checkout_sha)
+    except RuntimeError as exc:
+        log(
+            f"Unable to fetch `{location['path']}` at `{checkout_sha}` for coredump context: {exc}"
+        )
+        return {
+            "path": location["path"],
+            "line_number": location["line_number"],
+            "checkout_sha": checkout_sha,
+        }
+    lines = text.splitlines()
+    line_number = location["line_number"]
+    result = {
+        "path": location["path"],
+        "line_number": line_number,
+        "checkout_sha": checkout_sha,
+    }
+    if 1 <= line_number <= len(lines):
+        result["source_line"] = lines[line_number - 1].rstrip()
+    return result
 
 
 def job_sort_key(job):
@@ -396,6 +497,17 @@ class GitHubClient:
 
     def get_pr(self, pr_number):
         return self.get_json(f"/repos/{self.owner}/{self.repo}/pulls/{pr_number}")
+
+    def get_file_text(self, path, ref):
+        quoted_path = urllib.parse.quote(path.lstrip("/"), safe="/")
+        query = urllib.parse.urlencode({"ref": ref})
+        data = self.get_json(f"/repos/{self.owner}/{self.repo}/contents/{quoted_path}?{query}")
+        if data.get("type") != "file":
+            raise RuntimeError(f"`{path}` at `{ref}` is not a file.")
+        content = data.get("content", "")
+        if data.get("encoding") == "base64":
+            return base64.b64decode(content).decode("utf-8", errors="replace")
+        return content
 
     def download_job_logs(self, job_id):
         path = f"/repos/{self.owner}/{self.repo}/actions/jobs/{job_id}/logs"
@@ -1033,7 +1145,7 @@ def extract_test_step_lines(log_text, test_step):
     return result
 
 
-def collect_job_excerpt(client, job):
+def collect_job_excerpt(client, run, job, require_coredump_marker=False):
     test_step = find_test_step(job)
     if not test_step:
         if RESULT_POLICY == "always":
@@ -1063,6 +1175,20 @@ def collect_job_excerpt(client, job):
             }
         return None
 
+    coredump_marker_index = None
+    coredump_source = None
+    if job_matches_coredump_report_prefixes(job):
+        for index, line in enumerate(test_lines):
+            if COREDUMP_REPORT_PHRASE in line:
+                coredump_marker_index = index
+                break
+        if require_coredump_marker and coredump_marker_index is None:
+            return None
+        if coredump_marker_index is not None:
+            location = extract_coredump_source_location(test_lines)
+            if location:
+                coredump_source = fetch_coredump_source_line(client, run, location)
+
     match_index = None
     for index, line in enumerate(test_lines):
         if TARGET_PHRASE in line:
@@ -1079,26 +1205,35 @@ def collect_job_excerpt(client, job):
             note = f"Captured the {len(snippet_lines)} line(s) immediately before the first `{TARGET_PHRASE}`."
         else:
             note = f"Found `{TARGET_PHRASE}` at the start of the test output, so no preceding lines were available."
-        return {
+        result = {
             "job": job,
             "note": note,
             "snippet": "\n".join(snippet_lines) if snippet_lines else None,
         }
+        if coredump_source:
+            result["coredump_source"] = coredump_source
+        return result
 
     if SNIPPET_FALLBACK == "tail":
         snippet_lines = test_lines[-TAIL_SNIPPET_LINE_COUNT:]
-        return {
+        result = {
             "job": job,
             "note": f"Captured the last {len(snippet_lines)} line(s) of the completed `test` step output.",
             "snippet": "\n".join(snippet_lines),
         }
+        if coredump_source:
+            result["coredump_source"] = coredump_source
+        return result
 
     if RESULT_POLICY == "always":
-        return {
+        result = {
             "job": job,
             "note": f"`{TARGET_PHRASE}` was not found, and no fallback snippet was configured.",
             "snippet": None,
         }
+        if coredump_source:
+            result["coredump_source"] = coredump_source
+        return result
 
     return None
 
@@ -1113,13 +1248,14 @@ def result_summary(round_number):
 
 def post_job_result_comments_if_needed(client, pr_number, run, round_number, jobs, comments):
     markers = existing_result_markers(comments)
-    selected_jobs = select_result_jobs(jobs)
-    if not selected_jobs:
+    job_requests = select_result_job_requests(jobs)
+    if not job_requests:
         log(f"No matching jobs to report for run {run['id']} attempt {run.get('run_attempt', 1)}.")
         return False
 
     posted = False
-    for job in selected_jobs:
+    for job_request in job_requests:
+        job = job_request["job"]
         marker = result_marker(run["id"], run.get("run_attempt", 1), job.get("id"))
         if marker in markers:
             log(
@@ -1128,7 +1264,12 @@ def post_job_result_comments_if_needed(client, pr_number, run, round_number, job
             )
             continue
 
-        excerpt = collect_job_excerpt(client, job)
+        excerpt = collect_job_excerpt(
+            client,
+            run,
+            job,
+            require_coredump_marker=job_request["require_coredump_marker"],
+        )
         if not excerpt:
             continue
 
@@ -1146,6 +1287,19 @@ def post_job_result_comments_if_needed(client, pr_number, run, round_number, job
             f"- Capture: {excerpt.get('note', 'n/a')}",
             "",
         ]
+        if excerpt.get("coredump_source"):
+            source = excerpt["coredump_source"]
+            lines.append(f"- Coredump source: `{source['path']}:{source['line_number']}`")
+            lines.append("")
+            if source.get("source_line"):
+                lines.extend(
+                    [
+                        "```text",
+                        sanitize_block(source["source_line"]),
+                        "```",
+                        "",
+                    ]
+                )
         if excerpt.get("snippet"):
             lines.extend(
                 [
@@ -1175,14 +1329,19 @@ def post_attempt_result_comment_if_needed(client, pr_number, run, round_number, 
         log(f"Result comment already exists for run {run['id']} attempt {run.get('run_attempt', 1)}.")
         return False
 
-    selected_jobs = select_result_jobs(jobs)
-    if not selected_jobs:
+    job_requests = select_result_job_requests(jobs)
+    if not job_requests:
         log(f"No matching jobs to report for run {run['id']} attempt {run.get('run_attempt', 1)}.")
         return False
 
     results = []
-    for job in selected_jobs:
-        excerpt = collect_job_excerpt(client, job)
+    for job_request in job_requests:
+        excerpt = collect_job_excerpt(
+            client,
+            run,
+            job_request["job"],
+            require_coredump_marker=job_request["require_coredump_marker"],
+        )
         if excerpt:
             results.append(excerpt)
 
@@ -1211,6 +1370,19 @@ def post_attempt_result_comment_if_needed(client, pr_number, run, round_number, 
                 "",
             ]
         )
+        if result.get("coredump_source"):
+            source = result["coredump_source"]
+            lines.append(f"- Coredump source: `{source['path']}:{source['line_number']}`")
+            lines.append("")
+            if source.get("source_line"):
+                lines.extend(
+                    [
+                        "```text",
+                        sanitize_block(source["source_line"]),
+                        "```",
+                        "",
+                    ]
+                )
         if result.get("snippet"):
             lines.extend(
                 [
