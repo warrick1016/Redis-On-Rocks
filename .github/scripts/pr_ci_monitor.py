@@ -41,7 +41,7 @@ COREDUMP_REPORT_PHRASE = os.environ.get(
 )
 COREDUMP_REPORT_JOB_PREFIXES = tuple(
     value.strip()
-    for value in os.environ.get("COREDUMP_REPORT_JOB_PREFIXES", "swap-asan").split(",")
+    for value in os.environ.get("COREDUMP_REPORT_JOB_PREFIXES", "swap,swap-asan").split(",")
     if value.strip()
 )
 RESULT_POLICY = os.environ.get("RESULT_POLICY", "match_only")
