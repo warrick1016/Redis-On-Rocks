@@ -1,0 +1,88 @@
+name: PR15 CI Monitor
+
+on:
+  push:
+    branches: ["fix/loading"]
+    paths:
+      - ".github/scripts/pr_ci_monitor.py"
+      - ".github/workflows/pr15-ci-monitor.yml"
+  schedule:
+    - cron: "*/15 * * * *"
+  workflow_run:
+    workflows: ["CI"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      pr_number:
+        description: "Pull request number to monitor"
+        required: false
+        default: "15"
+      delay_seconds:
+        description: "Optional wait before running the monitor"
+        required: false
+        default: "0"
+      source:
+        description: "Dispatch source"
+        required: false
+        default: "manual"
+      reason:
+        description: "Dispatch reason"
+        required: false
+        default: ""
+
+permissions:
+  actions: write
+  contents: read
+  issues: write
+  pull-requests: write
+
+concurrency:
+  group: pr-ci-monitor-15
+  cancel-in-progress: false
+
+jobs:
+  monitor:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.x"
+
+      - name: Optional delay before monitor run
+        if: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.delay_seconds != '' && github.event.inputs.delay_seconds != '0' }}
+        run: sleep "${{ github.event.inputs.delay_seconds }}"
+
+      - name: Monitor PR15 CI
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TARGET_PR_NUMBER: ${{ github.event.inputs.pr_number || '15' }}
+          MIN_ROUNDS: "50"
+          MONITOR_SESSION_ID: "20260416-pr15-ci-r50-v1"
+          MONITOR_TRIGGER_DESCRIPTION: "triggered every 15 minutes via schedule, on CI completion via workflow_run, plus monitor-file push and manual workflow_dispatch"
+          TARGET_WORKFLOW_NAME: CI
+          TARGET_PHRASE: "couldn't open socket: connection refused"
+          JOB_SELECTION_MODE: "failed"
+          RESULT_JOB_PREFIXES: "swap,mem"
+          RESULT_POLICY: "always"
+          RESULT_COMMENT_MODE: "job"
+          SNIPPET_FALLBACK: "tail"
+          MATCH_LINE_POLICY: "exclude"
+          MATCH_PRECEDING_LINE_COUNT: "200"
+          TAIL_SNIPPET_LINE_COUNT: "30"
+          ENABLE_SELF_DISPATCH_BACKSTOP: "1"
+          PASSIVE_COMPLETION_MONITOR: "1"
+          PASSIVE_POLL_INTERVAL_MINUTES: "15"
+          ACTIVE_TRIGGER_IF_IDLE: "1"
+          ACTIVE_TRIGGER_POLL_INTERVAL_MINUTES: "15"
+          RECENT_COMPLETED_BACKFILL_MINUTES: "60"
+          ENABLE_CI_WORKFLOW_DISPATCH_RECOVERY: "1"
+          CI_DISPATCH_RETRY_AFTER_SECONDS: "1800"
+          FOLLOW_UP_POLL_SECONDS: "300"
+          MONITOR_WORKFLOW_FILE: "pr15-ci-monitor.yml"
+          MONITOR_WORKFLOW_REF: "fix/loading"
+          MONITOR_DISPATCH_SOURCE: ${{ github.event.inputs.source || '' }}
+        run: |
+          python3 .github/scripts/pr_ci_monitor.py
