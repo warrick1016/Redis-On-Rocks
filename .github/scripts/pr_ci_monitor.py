@@ -262,6 +262,8 @@ def select_result_jobs(jobs):
             for job in jobs
             if is_failed_job(job) and job_matches_result_prefixes(job)
         ]
+    if JOB_SELECTION_MODE == "all_completed":
+        return [job for job in jobs if job.get("status") == "completed"]
     raise RuntimeError(f"Unsupported JOB_SELECTION_MODE `{JOB_SELECTION_MODE}`.")
 
 
@@ -301,6 +303,11 @@ def build_state_jobs(jobs, run):
         if not selected:
             return [{"label": "failed jobs", "job": None, "message": "none"}]
         return [{"label": job.get("name", "job"), "job": job} for job in selected]
+    if JOB_SELECTION_MODE == "all_completed":
+        completed = [job for job in jobs if job.get("status") == "completed"]
+        if not completed:
+            return [{"label": "completed jobs", "job": None, "message": "none"}]
+        return [{"label": job.get("name", "job"), "job": job} for job in completed]
     raise RuntimeError(f"Unsupported JOB_SELECTION_MODE `{JOB_SELECTION_MODE}`.")
 
 
@@ -658,7 +665,7 @@ def progress_summary(state):
     completed = int(state.get("completed_rounds", 0))
     if PASSIVE_COMPLETION_MONITOR:
         return f"recorded `{completed}` completed CI attempt(s) in this session"
-    return f"`{completed}/{MIN_ROUNDS}`"
+    return f"`{completed}` completed attempt(s)"
 
 
 def active_polling_mode_enabled():
@@ -1196,15 +1203,10 @@ def collect_job_excerpt(client, run, job, require_coredump_marker=False):
             break
 
     if match_index is not None:
-        start_index = max(0, match_index - MATCH_PRECEDING_LINE_COUNT)
-        end_index = match_index + (1 if MATCH_LINE_POLICY == "include" else 0)
+        start_index = match_index + 1
+        end_index = min(len(test_lines), start_index + TAIL_SNIPPET_LINE_COUNT)
         snippet_lines = test_lines[start_index:end_index]
-        if MATCH_LINE_POLICY == "include":
-            note = f"Captured the first `{TARGET_PHRASE}` line with its preceding {MATCH_PRECEDING_LINE_COUNT} lines."
-        elif snippet_lines:
-            note = f"Captured the {len(snippet_lines)} line(s) immediately before the first `{TARGET_PHRASE}`."
-        else:
-            note = f"Found `{TARGET_PHRASE}` at the start of the test output, so no preceding lines were available."
+        note = f"Captured the {len(snippet_lines)} line(s) after the first `{TARGET_PHRASE}` line."
         result = {
             "job": job,
             "note": note,
@@ -1239,11 +1241,7 @@ def collect_job_excerpt(client, run, job, require_coredump_marker=False):
 
 
 def result_summary(round_number):
-    return (
-        f"Detected `{TARGET_PHRASE}` in CI round `{round_number}/{MIN_ROUNDS}`."
-        if RESULT_POLICY == "match_only"
-        else f"Captured failed job test output for CI round `{round_number}/{MIN_ROUNDS}`."
-    )
+    return f"Captured failed job test output (session round `{round_number}`)."
 
 
 def post_job_result_comments_if_needed(client, pr_number, run, round_number, jobs, comments):
@@ -1639,8 +1637,6 @@ def process_completed_runs_for_pr(
     note_prefix="",
     allow_active_trigger=True,
 ):
-    if not PASSIVE_COMPLETION_MONITOR and int(state.get("completed_rounds", 0)) >= MIN_ROUNDS:
-        return False
     if run.get("status") != "completed":
         return False
 
@@ -2157,7 +2153,13 @@ def main():
         )
         return 0
 
-    state["last_action"] = "target rounds reached"
+    state["last_action"] = "attempt already processed"
+    follow_up_note = queue_follow_up_monitor_if_needed(
+        client,
+        state,
+        f"processed:{run_attempt}",
+        f"wait-for-new-attempt:{run['id']}:{attempt}",
+    )
     upsert_state_comment(
         client,
         TARGET_PR_NUMBER,
@@ -2165,7 +2167,10 @@ def main():
         state,
         run,
         state_jobs,
-        f"Observed completed CI run `{run['id']}` attempt `{attempt}`, but the configured round target was already reached.{cancelled_note}",
+        (
+            f"Run `{run['id']}` attempt `{attempt}` was already processed in this session. "
+            f"{follow_up_note}"
+        ),
     )
     return 0
 
